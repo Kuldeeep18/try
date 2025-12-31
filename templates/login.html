@@ -1,0 +1,158 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="row justify-content-center">
+  <div class="col-md-5">
+    <div class="card shadow-lg border-0">
+      <div class="card-header bg-primary text-white text-center py-4">
+        <h4 class="mb-0">
+          <i class="bi bi-box-arrow-in-right me-2"></i>Welcome Back
+        </h4>
+        <p class="mb-0 opacity-75">Sign in to your account</p>
+      </div>
+      <div class="card-body p-4">
+        <form method="POST" id="loginForm" novalidate>
+          <!-- Username/Email Field -->
+          <div class="mb-3">
+            <label class="form-label fw-semibold">
+              <i class="bi bi-person me-1"></i>Username or Email <span class="text-danger">*</span>
+            </label>
+            <input type="text" name="username" class="form-control form-control-lg" 
+                   id="username" required autofocus
+                   placeholder="Enter username or email">
+            <div class="invalid-feedback">
+              Please enter your username or email.
+            </div>
+            <div class="valid-feedback">
+              Looks good!
+            </div>
+          </div>
+
+          <!-- Password Field -->
+          <div class="mb-4">
+            <label class="form-label fw-semibold">
+              <i class="bi bi-lock me-1"></i>Password <span class="text-danger">*</span>
+            </label>
+            <div class="input-group">
+              <input type="password" name="password" class="form-control form-control-lg" 
+                     id="password" required
+                     placeholder="Enter your password">
+              <button class="btn btn-outline-secondary" type="button" id="togglePassword">
+                <i class="bi bi-eye" id="toggleIcon"></i>
+              </button>
+            </div>
+            <div class="invalid-feedback">
+              Please enter your password.
+            </div>
+            <div class="valid-feedback">
+              Password entered!
+            </div>
+          </div>
+
+          <!-- Remember Me & Forgot Password -->
+          <div class="d-flex justify-content-between align-items-center mb-4">
+            <div class="form-check">
+              <input class="form-check-input" type="checkbox" id="rememberMe" name="remember_me">
+              <label class="form-check-label" for="rememberMe">
+                Remember me
+              </label>
+            </div>
+            <a href="#" class="text-decoration-none small">Forgot password?</a>
+          </div>
+
+          <!-- Submit Button -->
+          <div class="d-grid mb-3">
+            <button class="btn btn-primary btn-lg" type="submit" id="submitBtn">
+              <i class="bi bi-box-arrow-in-right me-2"></i>Sign In
+            </button>
+          </div>
+          
+          <!-- Signup Link -->
+          <div class="text-center">
+            <p class="mb-0 text-muted">Don't have an account? 
+              <a href="{{ url_for('signup') }}" class="text-decoration-none fw-semibold">Create Account</a>
+            </p>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Additional Info -->
+    <div class="text-center mt-4">
+      <small class="text-muted">
+        <i class="bi bi-shield-check me-1"></i>
+        Your data is secure and encrypted
+      </small>
+    </div>
+  </div>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+  const form = document.getElementById('loginForm');
+  const username = document.getElementById('username');
+  const password = document.getElementById('password');
+  const togglePassword = document.getElementById('togglePassword');
+  const toggleIcon = document.getElementById('toggleIcon');
+  const submitBtn = document.getElementById('submitBtn');
+
+  // Password visibility toggle
+  togglePassword.addEventListener('click', function() {
+    const type = password.getAttribute('type') === 'password' ? 'text' : 'password';
+    password.setAttribute('type', type);
+    toggleIcon.classList.toggle('bi-eye');
+    toggleIcon.classList.toggle('bi-eye-slash');
+  });
+
+  // Real-time validation
+  username.addEventListener('input', function() {
+    validateField(this);
+  });
+
+  password.addEventListener('input', function() {
+    validateField(this);
+  });
+
+  function validateField(field) {
+    if (field.value.trim().length > 0) {
+      field.classList.remove('is-invalid');
+      field.classList.add('is-valid');
+      return true;
+    } else {
+      field.classList.remove('is-valid');
+      field.classList.add('is-invalid');
+      return false;
+    }
+  }
+
+  // Form submission
+  form.addEventListener('submit', function(event) {
+    event.preventDefault();
+    
+    const isUsernameValid = validateField(username);
+    const isPasswordValid = validateField(password);
+
+    if (isUsernameValid && isPasswordValid) {
+      // Show loading state
+      submitBtn.innerHTML = '<i class="bi bi-hourglass-split me-2"></i>Signing In...';
+      submitBtn.disabled = true;
+      
+      // Submit form
+      this.submit();
+    } else {
+      // Focus on first invalid field
+      const firstInvalid = form.querySelector('.is-invalid');
+      if (firstInvalid) {
+        firstInvalid.focus();
+      }
+    }
+  });
+
+  // Handle form errors (if any)
+  const urlParams = new URLSearchParams(window.location.search);
+  if (urlParams.get('error')) {
+    username.classList.add('is-invalid');
+    password.classList.add('is-invalid');
+  }
+});
+</script>
+{% endblock %}
