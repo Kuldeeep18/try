@@ -72,17 +72,6 @@
                   <div class="d-flex align-items-center gap-2 mb-2">
                     <h2 class="h4 mb-0">Link Analytics</h2>
                     <span class="badge bg-success">{{ link.state }}</span>
-                    
-                    <!-- Time Range Selector -->
-                    <div class="ms-auto d-flex align-items-center gap-2">
-                      <span class="text-muted small">Range:</span>
-                      <div class="btn-group btn-group-sm" role="group">
-                        <a href="?range=all" class="btn btn-outline-primary {% if current_range == 'all' %}active{% endif %}">All</a>
-                        <a href="?range=30d" class="btn btn-outline-primary {% if current_range == '30d' %}active{% endif %}">30D</a>
-                        <a href="?range=7d" class="btn btn-outline-primary {% if current_range == '7d' %}active{% endif %}">7D</a>
-                        <a href="?range=24h" class="btn btn-outline-primary {% if current_range == '24h' %}active{% endif %}">24H</a>
-                      </div>
-                    </div>
                   </div>
                 <div class="mb-2">
                   <span class="text-muted small">Short Code:</span>
@@ -129,14 +118,14 @@
                     Download CSV
                   </a>
                   <button class="btn btn-primary btn-sm w-100"
-                    onclick="navigator.clipboard.writeText('http://10.42.92.189:5000/links/{{ link.code }}/csv')">
+                    onclick="navigator.clipboard.writeText('{{ request.url_root }}links/{{ link.code }}/csv')">
                     Copy CSV Link
                   </button>
                 </div>
                 <!-- QR Code encodes the direct CSV download URL -->
                 <div class="bg-white p-1 rounded border">
                   <img
-                    src="https://api.qrserver.com/v1/create-qr-code/?size=80x80&data=http://10.42.92.189:5000/links/{{ link.code }}/csv"
+                    src="https://api.qrserver.com/v1/create-qr-code/?size=80x80&data={{ request.url_root }}links/{{ link.code }}/csv"
                     alt="Scan to download CSV" width="80" height="80">
                 </div>
               </div>
@@ -238,7 +227,7 @@
               </div>
               <div class="mt-3 p-3 bg-light rounded">
                 <p class="small mb-0">
-                  <strong>Insight:</strong> Peak activity patterns suggest professional audience behavior.
+                  <strong>Insight:</strong> {{ frequency_insight }}
                 </p>
               </div>
             </div>
@@ -327,63 +316,6 @@
                 <p class="small mb-0 text-info">
                   <strong>Insight:</strong> {{ weekend_insight }}
                 </p>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <!-- Top Cities -->
-        <div class="col-lg-6">
-          <div class="card shadow-sm h-100">
-            <div class="card-body">
-              <div class="d-flex justify-content-between align-items-start mb-3">
-                <div>
-                  <h4 class="h6 fw-bold mb-1">
-                    <svg width="16" height="16" fill="currentColor" class="text-primary me-2" viewBox="0 0 16 16">
-                      <path d="M8 16s6-5.686 6-10A6 6 0 0 0 2 6c0 4.314 6 10 6 10zm0-7a3 3 0 1 1 0-6 3 3 0 0 1 0 6z"/>
-                    </svg>
-                    Top Cities
-                  </h4>
-                  <p class="small text-muted mb-0">Most active cities worldwide</p>
-                </div>
-              </div>
-              <div style="height: 280px;">
-                <canvas id="cityChart"></canvas>
-              </div>
-              <div class="mt-3">
-                {% if city_data %}
-                <div class="table-responsive">
-                  <table class="table table-sm mb-0">
-                    <tbody>
-                      {% for city in city_data[:5] %}
-                      <tr>
-                        <td class="border-0 small">
-                          <div class="d-flex align-items-center">
-                            <div class="bg-primary bg-opacity-10 rounded-circle me-2" style="width: 8px; height: 8px;"></div>
-                            {% if city.country and city.country != 'Unknown' %}
-                              {{ city.city }}, {{ city.country }}
-                            {% else %}
-                              {{ city.city }}
-                            {% endif %}
-                          </div>
-                        </td>
-                        <td class="border-0 small text-end fw-medium">{{ "{:,}".format(city.count) }}</td>
-                        <td class="border-0 small text-end text-muted">{{ ((city.count * 100) / (totals.total or
-                          1))|round|int }}%</td>
-                      </tr>
-                      {% endfor %}
-                    </tbody>
-                  </table>
-                </div>
-                {% else %}
-                <div class="text-center py-4">
-                  <svg width="48" height="48" fill="currentColor" class="text-muted mb-3" viewBox="0 0 16 16">
-                    <path d="M8 16s6-5.686 6-10A6 6 0 0 0 2 6c0 4.314 6 10 6 10zm0-7a3 3 0 1 1 0-6 3 3 0 0 1 0 6z"/>
-                  </svg>
-                  <p class="small text-muted mb-0">No city data available yet</p>
-                  <p class="small text-muted mb-0">Waiting for more visitors...</p>
-                </div>
-                {% endif %}
               </div>
             </div>
           </div>

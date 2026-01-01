@@ -166,31 +166,6 @@ document.addEventListener('DOMContentLoaded', function () {
     const data = window.analyticsData;
     console.log('Analytics data loaded:', data);
 
-    // Helper function to show insufficient data message
-    function showInsufficientDataMessage(canvasElement) {
-        const container = canvasElement.parentElement;
-        canvasElement.style.display = 'none';
-
-        const messageDiv = document.createElement('div');
-        messageDiv.className = 'alert alert-info d-flex align-items-center justify-content-center';
-        messageDiv.style.height = '280px';
-        messageDiv.innerHTML = `
-            <div class="text-center">
-                <svg width="48" height="48" fill="currentColor" class="text-info mb-3" viewBox="0 0 16 16">
-                    <path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16zm.93-9.412-1 4.705c-.07.34.029.533.304.533.194 0 .487-.07.686-.246l-.088.416c-.287.346-.92.598-1.465.598-.703 0-1.002-.422-.808-1.319l.738-3.468c.064-.293.006-.399-.287-.47l-.451-.081.082-.381 2.29-.287zM8 5.5a1 1 0 1 1 0-2 1 1 0 0 1 0 2z"/>
-                </svg>
-                <p class="mb-0 fw-medium">Not enough data yet</p>
-                <p class="small text-muted mb-0">Waiting for more visitors...</p>
-            </div>
-        `;
-        container.appendChild(messageDiv);
-    }
-
-    // Relaxed check: Simply checking if we have ANY data
-    function hasData(dataArray) {
-        return dataArray && Array.isArray(dataArray) && dataArray.length > 0;
-    }
-
     // 1. Attention Decay Chart
     const attentionCtx = document.getElementById('attentionDecayChart');
     if (attentionCtx) {
@@ -568,94 +543,6 @@ document.addEventListener('DOMContentLoaded', function () {
         });
     }
 
-    // 8. Top Cities Chart (Horizontal Bar Chart for better readability)
-    const cityCtx = document.getElementById('cityChart');
-    if (cityCtx) {
-        // Always show the chart, even with no data
-        const cityData = data.cities || [];
-        const labels = cityData.length > 0 
-            ? cityData.map(c => c.country && c.country !== 'Unknown' ? `${c.city}, ${c.country}` : c.city)
-            : ['No data yet'];
-        const chartData = cityData.length > 0 
-            ? cityData.map(c => c.count)
-            : [0];
-        
-        new Chart(cityCtx, {
-            type: 'bar',
-            data: {
-                labels: labels,
-                datasets: [{
-                    label: 'Visitors',
-                    data: chartData,
-                    backgroundColor: [
-                        'rgba(59, 130, 246, 0.8)',   // Blue
-                        'rgba(34, 197, 94, 0.8)',    // Green
-                        'rgba(168, 85, 247, 0.8)',   // Purple
-                        'rgba(245, 158, 11, 0.8)',   // Yellow
-                        'rgba(239, 68, 68, 0.8)',    // Red
-                        'rgba(20, 184, 166, 0.8)',   // Teal
-                        'rgba(236, 72, 153, 0.8)',   // Pink
-                        'rgba(99, 102, 241, 0.8)',   // Indigo
-                        'rgba(251, 191, 36, 0.8)',   // Amber
-                        'rgba(139, 69, 19, 0.8)'     // Brown
-                    ],
-                    borderColor: [
-                        '#3b82f6', '#22c55e', '#a855f7', '#f59e0b', '#ef4444',
-                        '#14b8a6', '#ec4899', '#6366f1', '#fbbf24', '#8b4513'
-                    ],
-                    borderWidth: 2,
-                    borderRadius: 4,
-                    borderSkipped: false,
-                }]
-            },
-            options: {
-                indexAxis: 'y', // This makes it horizontal
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: {
-                    legend: { display: false },
-                    tooltip: {
-                        backgroundColor: 'rgba(0, 0, 0, 0.8)',
-                        padding: 12,
-                        cornerRadius: 8,
-                        callbacks: {
-                            title: function(context) {
-                                return context[0].label;
-                            },
-                            label: function(context) {
-                                if (cityData.length === 0) return 'No visitors yet';
-                                const total = context.dataset.data.reduce((a, b) => a + b, 0);
-                                const percentage = ((context.parsed.x * 100) / total).toFixed(1);
-                                return `${context.parsed.x} visitors (${percentage}%)`;
-                            }
-                        }
-                    }
-                },
-                scales: {
-                    x: {
-                        beginAtZero: true,
-                        ticks: { precision: 0 },
-                        grid: { color: 'rgba(0, 0, 0, 0.05)' }
-                    },
-                    y: { 
-                        grid: { display: false },
-                        ticks: {
-                            font: { size: 11 },
-                            callback: function(value, index, values) {
-                                const label = this.getLabelForValue(value);
-                                return label.length > 20 ? label.substring(0, 17) + '...' : label;
-                            }
-                        }
-                    }
-                },
-                animation: {
-                    duration: 1000,
-                    easing: 'easeOutQuart'
-                }
-            }
-        });
-    }
-
     // Export to CSV Function
     window.exportToCSV = function () {
         if (!data) return;
@@ -672,14 +559,6 @@ document.addEventListener('DOMContentLoaded', function () {
         if (data.region) {
             data.region.forEach(r => {
                 csvContent += `Continent,${r.location},${r.count}\n`;
-            });
-        }
-
-        // Add City Data
-        if (data.cities) {
-            data.cities.forEach(c => {
-                const cityName = c.country && c.country !== 'Unknown' ? `${c.city}, ${c.country}` : c.city;
-                csvContent += `City,${cityName},${c.count}\n`;
             });
         }
 

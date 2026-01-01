@@ -399,22 +399,6 @@ def create_app() -> Flask:
         if not link:
             abort(404)
 
-        # Time range filtering
-        time_range = request.args.get('range', 'all')
-        time_filter = ""
-        time_args = [link["id"]]
-        
-        now_utc = datetime.utcnow()
-        if time_range == '24h':
-            time_filter = " AND ts >= ?"
-            time_args.append((now_utc - timedelta(days=1)).isoformat())
-        elif time_range == '7d':
-            time_filter = " AND ts >= ?"
-            time_args.append((now_utc - timedelta(days=7)).isoformat())
-        elif time_range == '30d':
-            time_filter = " AND ts >= ?"
-            time_args.append((now_utc - timedelta(days=30)).isoformat())
-
         # Get the behavior rule for this link
         behavior_rule = None
         if link["behavior_rule_id"]:
@@ -426,15 +410,15 @@ def create_app() -> Flask:
                 [g.user["id"]], one=True
             )
 
-        # Get ALL visits for the charts within the time range (not limited to 200)
+        # Get ALL visits for the charts (not limited to 200)
         all_visits_for_charts = query_db(
-            f"""
+            """
             SELECT ts, behavior, is_suspicious, region, device, country, city, latitude, longitude, timezone
             FROM visits
-            WHERE link_id = ?{time_filter}
+            WHERE link_id = ?
             ORDER BY ts DESC
             """,
-            time_args,
+            [link["id"]],
         )
 
         # Still limit to 200 for the "Recent Visits" table to maintain performance
@@ -488,11 +472,11 @@ def create_app() -> Flask:
         # For the table, we only need the first 200 recalculated visits
         recalculated_visits = recalculated_visits_all[:200]
 
-        # Calculate totals for the filtered range using ALL visits
+        # Calculate totals using ALL visits
         total_visits_all = len(all_visits_for_charts)
-        unique_visitors = len(set(v["session_id"] for v in query_db(f"SELECT session_id FROM visits WHERE link_id = ?{time_filter}", time_args)))
+        unique_visitors = len(set(v["session_id"] for v in query_db("SELECT session_id FROM visits WHERE link_id = ?", [link["id"]])))
         
-        # Behavior counts for the filtered range
+        # Behavior counts
         suspicious_count = sum(1 for v in all_visits_for_charts if v["is_suspicious"])
         curious_count = sum(1 for v in recalculated_visits_all if v["behavior"] == "Curious")
         interested_count = sum(1 for v in recalculated_visits_all if v["behavior"] == "Interested")
@@ -522,16 +506,6 @@ def create_app() -> Flask:
         region_data = [{'location': continent, 'count': count} 
                       for continent, count in sorted(continent_counts.items(), 
                                                    key=lambda x: x[1], reverse=True)]
-
-        # Get city distribution using ALL visits
-        city_counts = {}
-        for v in all_visits_for_charts:
-            if v["city"] and v["city"] != "Unknown":
-                key = (v["city"], v["country"])
-                city_counts[key] = city_counts.get(key, 0) + 1
-        
-        city_data = [{"city": k[0], "country": k[1], "count": v} 
-                    for k, v in sorted(city_counts.items(), key=lambda x: x[1], reverse=True)[:10]]
 
         # Get device distribution using ALL visits
         device_counts = {}
@@ -577,10 +551,10 @@ def create_app() -> Flask:
 
         # Get raw timestamps for Python-side processing
         hourly_raw = query_db(
-            f"""
-            SELECT ts FROM visits WHERE link_id = ?{time_filter}
+            """
+            SELECT ts FROM visits WHERE link_id = ?
             """,
-            time_args,
+            [link["id"]],
         )
         
         # Process hourly distribution in Python
@@ -604,6 +578,28 @@ def create_app() -> Flask:
                 
         hourly_data = sorted(final_hourly_data, key=lambda x: x["hour"])
 
+        # Generate frequency insight based on hourly patterns
+        if hourly_data and any(h["count"] > 0 for h in hourly_data):
+            # Find peak hours
+            max_count = max(h["count"] for h in hourly_data)
+            peak_hours = [h["hour"] for h in hourly_data if h["count"] == max_count]
+            
+            # Business hours (9-17) vs after hours analysis
+            business_hours_total = sum(h["count"] for h in hourly_data if 9 <= h["hour"] <= 17)
+            total_clicks = sum(h["count"] for h in hourly_data)
+            business_percentage = (business_hours_total / total_clicks * 100) if total_clicks > 0 else 0
+            
+            if business_percentage > 70:
+                frequency_insight = "Peak activity during business hours suggests professional audience behavior."
+            elif business_percentage < 30:
+                frequency_insight = "High after-hours activity indicates consumer or international audience."
+            elif peak_hours and any(h >= 18 or h <= 8 for h in peak_hours):
+                frequency_insight = "Evening peak activity suggests consumer-focused content engagement."
+            else:
+                frequency_insight = "Balanced activity pattern across different time periods."
+        else:
+            frequency_insight = "Gathering initial click pattern data for analysis."
+
         trust = trust_score(link["id"])
         # Use full visits for attention decay to show history, or filtered if preferred
         # Here we use recalculated_visits which is already filtered by time_range
@@ -624,10 +620,8 @@ def create_app() -> Flask:
             "hourly": [dict(row) for row in hourly_data],
             "daily": daily_data,
             "region": [dict(row) for row in region_data],
-            "cities": [dict(row) for row in city_data],
             "device": [dict(row) for row in device_data],
-            "weekend_insight": weekend_insight,
-            "time_range": time_range
+            "weekend_insight": weekend_insight
         }
 
         return render_template(
@@ -638,14 +632,13 @@ def create_app() -> Flask:
             trust=trust,
             attention=attention,
             region_data=region_data,
-            city_data=city_data,
             device_data=device_data,
             hourly_data=hourly_data,
             daily_data=daily_data,
             weekend_insight=weekend_insight,
+            frequency_insight=frequency_insight,
             analytics_payload=analytics_payload,
-            behavior_rule=behavior_rule,
-            current_range=time_range
+            behavior_rule=behavior_rule
         )
 
     @app.route("/links/<code_id>/csv")
@@ -756,11 +749,6 @@ def create_app() -> Flask:
         for r in region_data:
             writer.writerow(['Continent', r['location'], r['count']])
         
-        # Cities
-        for c in city_data:
-            city_country = f"{c['city']}, {c['country']}" if c['country'] else c['city']
-            writer.writerow(['City', city_country, c['count']])
-            
         # Device
         for d in device_data:
             writer.writerow(['Device', d['device'], d['count']])
