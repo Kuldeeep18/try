@@ -108,7 +108,8 @@
                 <div class="d-flex flex-column align-items-start">
                   <p class="small fw-bold text-muted mb-2">Scan to Download Report</p>
                   <!-- Button now links directly to the server-side CSV route -->
-                  <a href="/links/{{ link.code }}/csv" class="btn btn-outline-dark btn-sm mb-2 w-100">
+                  <a href="{{ url_for('export_csv', code_id=link.code) }}"
+                    class="btn btn-outline-dark btn-sm mb-2 w-100">
                     <svg width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
                       <path
                         d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5z" />
@@ -118,14 +119,15 @@
                     Download CSV
                   </a>
                   <button class="btn btn-primary btn-sm w-100"
-                    onclick="navigator.clipboard.writeText('http://10.42.92.189:5000/links/{{ link.code }}/csv')">
+                    data-csv-url="{{ url_for('export_csv', code_id=link.code, _external=True) }}"
+                    onclick="navigator.clipboard.writeText(this.dataset.csvUrl)">
                     Copy CSV Link
                   </button>
                 </div>
                 <!-- QR Code encodes the direct CSV download URL -->
                 <div class="bg-white p-1 rounded border">
                   <img
-                    src="https://api.qrserver.com/v1/create-qr-code/?size=80x80&data=http://10.42.92.189:5000/links/{{ link.code }}/csv"
+                    src="https://api.qrserver.com/v1/create-qr-code/?size=80x80&data={{ url_for('export_csv', code_id=link.code, _external=True) }}"
                     alt="Scan to download CSV" width="80" height="80">
                 </div>
               </div>
@@ -248,19 +250,18 @@
                 <canvas id="intentClassificationChart"></canvas>
               </div>
               <div class="mt-3 row g-2 text-center">
+                {% set total_visitors = totals.unique_visitors or 1 %}
                 <div class="col-4">
                   <div class="p-2 bg-secondary bg-opacity-10 rounded">
                     <p class="small text-muted mb-1">Curious</p>
-                    <p class="h5 fw-bold mb-0">{{ ((totals.curious or 0) * 100 / (totals.unique_visitors or
-                      1))|round|int }}%</p>
+                    <p class="h5 fw-bold mb-0">{{ ((totals.curious or 0) * 100 / total_visitors)|round|int }}%</p>
                     <p class="small text-muted mb-0">{{ "{:,}".format(totals.curious or 0) }}</p>
                   </div>
                 </div>
                 <div class="col-4">
                   <div class="p-2 bg-warning bg-opacity-10 rounded">
                     <p class="small text-muted mb-1">Interested</p>
-                    <p class="h5 fw-bold mb-0">{{ ((totals.interested or 0) * 100 / (totals.unique_visitors or
-                      1))|round|int }}%
+                    <p class="h5 fw-bold mb-0">{{ ((totals.interested or 0) * 100 / total_visitors)|round|int }}%
                     </p>
                     <p class="small text-muted mb-0">{{ "{:,}".format(totals.interested or 0) }}</p>
                   </div>
@@ -268,8 +269,7 @@
                 <div class="col-4">
                   <div class="p-2 bg-success bg-opacity-10 rounded">
                     <p class="small text-muted mb-1">Engaged</p>
-                    <p class="h5 fw-bold mb-0">{{ ((totals.engaged or 0) * 100 / (totals.unique_visitors or
-                      1))|round|int }}%</p>
+                    <p class="h5 fw-bold mb-0">{{ ((totals.engaged or 0) * 100 / total_visitors)|round|int }}%</p>
                     <p class="small text-muted mb-0">{{ "{:,}".format(totals.engaged or 0) }}</p>
                   </div>
                 </div>
@@ -292,9 +292,12 @@
                 <canvas id="trafficQualityChart"></canvas>
               </div>
               <div class="mt-3 p-3 bg-success bg-opacity-10 rounded">
+                {% set total_clicks = totals.total or 1 %}
+                {% set suspicious = totals.suspicious or 0 %}
+                {% set human_percentage = (((total_clicks - suspicious) * 100) / total_clicks)|round|int %}
                 <p class="small mb-0 text-success">
-                  <strong>Insight:</strong> {{ ((((totals.total or 1) - (totals.suspicious or 0)) * 100) / (totals.total
-                  or 1))|round|int }}% human traffic with {{ "{:,}".format(totals.suspicious or 0) }} suspicious clicks
+                  <strong>Insight:</strong> {{ human_percentage }}% human traffic with {{ "{:,}".format(suspicious) }}
+                  suspicious clicks
                   detected.
                 </p>
               </div>
@@ -346,8 +349,8 @@
                 <div class="col-4">
                   <div class="p-2 bg-light rounded">
                     <p class="small text-muted mb-1">{{ device.device }}</p>
-                    <p class="h5 fw-bold mb-0">{{ ((device.count * 100) / (totals.unique_visitors or 1))|round|int }}%
-                    </p>
+                    {% set pct = ((device.count * 100) / (totals.unique_visitors or 1))|round|int %}
+                    <p class="h5 fw-bold mb-0">{{ pct }}%</p>
                     <p class="small text-muted mb-0">{{ "{:,}".format(device.count) }}</p>
                   </div>
                 </div>
@@ -379,9 +382,8 @@
                       <tr>
                         <td class="border-0 small">{{ region.location }}</td>
                         <td class="border-0 small text-end">{{ "{:,}".format(region.count) }}</td>
-                        <td class="border-0 small text-end text-muted">{{ ((region.count * 100) /
-                          (totals.unique_visitors or
-                          1))|round|int }}%</td>
+                        {% set r_pct = ((region.count * 100) / (totals.unique_visitors or 1))|round|int %}
+                        <td class="border-0 small text-end text-muted">{{ r_pct }}%</td>
                       </tr>
                       {% endfor %}
                     </tbody>

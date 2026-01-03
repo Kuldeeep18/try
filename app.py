@@ -51,9 +51,6 @@ SUSPICIOUS_INTERVAL_SECONDS = 1.0
 ATTENTION_DECAY_DAYS = 14
 STATE_DECAY_DAYS = 21
 USER_SESSION_KEY = "uid"
-UPLOAD_FOLDER = os.path.join(os.path.dirname(__file__), "static", "uploads")
-ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
-MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
 
 # GeoIP Configuration
 GEOIP_DB_PATH = os.path.join(os.path.dirname(__file__), "GeoLite2-City.mmdb")
@@ -184,25 +181,37 @@ def create_app() -> Flask:
             behavior_rule_id = None
 
         now = utcnow()
-        execute_db(
-            """
-            INSERT INTO links
-                (code, primary_url, returning_url, cta_url,
-                 behavior_rule, created_at, state, user_id, behavior_rule_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            [
-                code,
-                primary_url,
-                data.get("returning_url") or primary_url,
-                data.get("cta_url") or primary_url,
-                data.get("behavior_rule") or "standard",
-                now.isoformat(),
-                "Active",
-                g.user["id"],
-                behavior_rule_id,
-            ],
-        )
+        try:
+            execute_db(
+                """
+                INSERT INTO links
+                    (code, primary_url, returning_url, cta_url,
+                     variant_a_url, variant_b_url,
+                     behavior_rule, created_at, state, user_id, behavior_rule_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    code,
+                    primary_url,
+                    data.get("returning_url") or primary_url,
+                    data.get("cta_url") or primary_url,
+                    data.get("variant_a_url") or primary_url,
+                    data.get("variant_b_url") or primary_url,
+                    data.get("behavior_rule") or "standard",
+                    now.isoformat(),
+                    "Active",
+                    g.user["id"],
+                    behavior_rule_id,
+                ],
+            )
+        except sqlite3.IntegrityError as e:
+            flash(f"Database Integrity Error: {str(e)}", "danger")
+            return redirect(url_for("index"))
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            flash(f"An unexpected error occurred: {str(e)}", "danger")
+            return redirect(url_for("index"))
         flash(f"Link created with code {code}", "success")
         return redirect(url_for("index"))
 
@@ -392,44 +401,37 @@ def create_app() -> Flask:
     @app.route("/links/<code>")
     @login_required
     def analytics(code):
-        link = query_db("SELECT * FROM links WHERE code = ?", [code], one=True)
-        if not link:
-            abort(404)
+        try:
+            link = query_db("SELECT * FROM links WHERE code = ?", [code], one=True)
+            if not link:
+                abort(404)
 
-        # Get the behavior rule for this link
-        behavior_rule = None
-        if link["behavior_rule_id"]:
-            behavior_rule = query_db("SELECT * FROM behavior_rules WHERE id = ?", [link["behavior_rule_id"]], one=True)
-        else:
-            # Get user's default behavior rule
-            behavior_rule = query_db(
-                "SELECT * FROM behavior_rules WHERE user_id = ? AND is_default = 1",
-                [g.user["id"]], one=True
+            # Get the behavior rule for this link
+            behavior_rule = None
+            if link["behavior_rule_id"]:
+                behavior_rule = query_db("SELECT * FROM behavior_rules WHERE id = ?", [link["behavior_rule_id"]], one=True)
+            else:
+                # Get user's default behavior rule
+                behavior_rule = query_db(
+                    "SELECT * FROM behavior_rules WHERE user_id = ? AND is_default = 1",
+                    [g.user["id"]], one=True
+                )
+
+            visits = query_db(
+                """
+                SELECT ts, behavior, is_suspicious, region, device, country, city, latitude, longitude, timezone
+                FROM visits
+                WHERE link_id = ?
+                ORDER BY ts DESC
+                LIMIT 200
+                """,
+                [link["id"]],
             )
 
-        visits = query_db(
-            """
-            SELECT ts, behavior, is_suspicious, region, device, country, city, latitude, longitude, timezone
-            FROM visits
-            WHERE link_id = ?
-            ORDER BY ts DESC
-            LIMIT 200
-            """,
-            [link["id"]],
-        )
-
-        # Recalculate behavior classifications with custom rules
-        now = utcnow()
-        recalculated_visits = []
-        for visit in visits:
-            visit_time = datetime.fromisoformat(visit["ts"])
-            # Get session visits for this specific visit
-            session_visits = query_db(
-                "SELECT ts FROM visits WHERE link_id = ? AND session_id = (SELECT session_id FROM visits WHERE id = (SELECT id FROM visits WHERE link_id = ? AND ts = ? LIMIT 1))",
-                [link["id"], link["id"], visit["ts"]]
-            )
+            # Recalculate behavior classifications with custom rules
+            now = utcnow()
             
-            # Reclassify behavior using custom rules
+            # Initialize rules before loop to ensure they exist even if visits is empty
             if behavior_rule:
                 returning_window_hours = behavior_rule["returning_window_hours"]
                 interested_threshold = behavior_rule["interested_threshold"]
@@ -438,247 +440,261 @@ def create_app() -> Flask:
                 returning_window_hours = RETURNING_WINDOW_HOURS
                 interested_threshold = 2
                 engaged_threshold = MULTI_CLICK_THRESHOLD
-            
-            # Count recent visits and session visits
-            recent_visits = [v for v in session_visits if (now - datetime.fromisoformat(v["ts"])).total_seconds() < returning_window_hours * 3600]
-            session_count = len(session_visits)
-            
-            # Reclassify
-            if session_count >= engaged_threshold:
-                new_behavior = "Highly engaged"
-            elif len(recent_visits) >= interested_threshold:
-                new_behavior = "Interested"
-            else:
-                new_behavior = "Curious"
-            
-            # Create updated visit dict
-            updated_visit = dict(visit)
-            updated_visit["behavior"] = new_behavior
-            recalculated_visits.append(updated_visit)
 
-        # Calculate unique user behavior
-        # Group visits by ip_hash to analyze user behavior
-        user_behaviors = query_db(
-            """
-            SELECT 
-                ip_hash,
-                COUNT(*) as total_visits,
-                SUM(CASE WHEN ts >= datetime('now', '-' || ? || ' hours') THEN 1 ELSE 0 END) as recent_visits
-            FROM visits 
-            WHERE link_id = ? 
-            GROUP BY ip_hash
-            """,
-            [returning_window_hours if behavior_rule else RETURNING_WINDOW_HOURS, link["id"]]
-        )
-
-        curious_users = 0
-        interested_users = 0
-        engaged_users = 0
-
-        for user in user_behaviors:
-            is_engaged = user["total_visits"] >= (behavior_rule["engaged_threshold"] if behavior_rule else MULTI_CLICK_THRESHOLD)
-            is_interested = user["recent_visits"] >= (behavior_rule["interested_threshold"] if behavior_rule else 2)
-            
-            if is_engaged:
-                engaged_users += 1
-            elif is_interested:
-                interested_users += 1
-            else:
-                curious_users += 1
-
-        # Calculate totals
-        total_visits = len(recalculated_visits)
-        # Use ip_hash for unique visitors instead of session_id for better persistence
-        unique_visitors_query = query_db("SELECT DISTINCT ip_hash FROM visits WHERE link_id = ?", [link["id"]])
-        unique_visitors = len(unique_visitors_query)
-        suspicious_count = sum(1 for v in recalculated_visits if v["is_suspicious"])
-        
-        # Update totals dictionary with USER counts instead of VISIT counts
-        curious_count = curious_users
-        interested_count = interested_users
-        engaged_count = engaged_users
-
-        totals = {
-            "total": total_visits,
-            "unique_visitors": unique_visitors,
-            "suspicious": suspicious_count,
-            "curious": curious_count,
-            "interested": interested_count,
-            "engaged": engaged_count
-        }
-        
-        # Get region distribution (grouped by continent)
-        region_data_raw = query_db(
-            """
-            SELECT 
-                CASE 
-                    WHEN country IS NOT NULL AND country != 'Unknown' THEN country
-                    ELSE region 
-                END as location,
-                COUNT(DISTINCT ip_hash) as count
-            FROM visits
-            WHERE link_id = ? AND (country IS NOT NULL OR region IS NOT NULL)
-            GROUP BY location
-            ORDER BY count DESC
-            """,
-            [link["id"]],
-        )
-        
-        # Group countries into continents
-        continent_counts = {}
-        for row in region_data_raw:
-            continent = country_to_continent(row['location'])
-            if continent in continent_counts:
-                continent_counts[continent] += row['count']
-            else:
-                continent_counts[continent] = row['count']
-        
-        # Convert back to list format for template
-        region_data = [{'location': continent, 'count': count} 
-                      for continent, count in sorted(continent_counts.items(), 
-                                                   key=lambda x: x[1], reverse=True)]
-
-        # Get city distribution
-        city_data = query_db(
-            """
-            SELECT city, country, COUNT(DISTINCT ip_hash) as count 
-            FROM visits 
-            WHERE link_id = ? AND city IS NOT NULL AND city != 'Unknown'
-            GROUP BY city, country
-            ORDER BY count DESC
-            LIMIT 20
-            """, 
-            [link["id"]]
-        )
-
-        # Get device distribution
-        device_data = query_db(
-            """
-            SELECT device, COUNT(DISTINCT ip_hash) as count
-            FROM visits
-            WHERE link_id = ? AND device IS NOT NULL
-            GROUP BY device
-            """,
-            [link["id"]],
-        )
-
-        # Get daily engagement trends (7-day pattern) using SQL
-        daily_raw = query_db(
-            """
-            SELECT 
-                CASE CAST(strftime('%w', ts) AS INTEGER)
-                    WHEN 0 THEN 'Sun'
-                    WHEN 1 THEN 'Mon'
-                    WHEN 2 THEN 'Tue'
-                    WHEN 3 THEN 'Wed'
-                    WHEN 4 THEN 'Thu'
-                    WHEN 5 THEN 'Fri'
-                    WHEN 6 THEN 'Sat'
-                END as day_name,
-                COUNT(*) as count
-            FROM visits 
-            WHERE link_id = ?
-            GROUP BY strftime('%w', ts)
-            ORDER BY CAST(strftime('%w', ts) AS INTEGER)
-            """,
-            [link["id"]],
-        )
-        
-        # Ensure all days are present with 0 counts if no data
-        day_names = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
-        daily_counts = {row['day_name']: row['count'] for row in daily_raw}
-        
-        daily_data = []
-        for day_name in day_names:
-            count = daily_counts.get(day_name, 0)
-            daily_data.append({"day": day_name, "count": count})
-        
-        # Calculate weekend vs weekday insight
-        weekday_total = sum(daily_counts.get(day, 0) for day in ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'])
-        weekend_total = sum(daily_counts.get(day, 0) for day in ['Sat', 'Sun'])
-        
-        weekend_insight = ""
-        if weekday_total > 0 and weekend_total > 0:
-            weekend_percentage = ((weekend_total - weekday_total) / weekday_total) * 100
-            if weekend_percentage > 20:
-                weekend_insight = f"Weekend traffic shows {abs(weekend_percentage):.0f}% increase compared to weekdays, suggesting consumer-focused audience behavior."
-            elif weekend_percentage < -20:
-                weekend_insight = f"Weekday traffic shows {abs(weekend_percentage):.0f}% increase compared to weekends, suggesting business-focused audience behavior."
-            else:
-                weekend_insight = "Traffic is fairly consistent between weekdays and weekends."
-        else:
-            weekend_insight = "Gathering engagement pattern data..."
-
-        # Get raw timestamps for Python-side processing
-        hourly_raw = query_db(
-            """
-            SELECT ts FROM visits WHERE link_id = ?
-            """,
-            [link["id"]],
-        )
-        
-        # Process hourly distribution in Python
-        from collections import Counter
-        
-        local_hours = []
-        for row in hourly_raw:
-            try:
-                dt_utc = datetime.fromisoformat(row["ts"])
-                dt_local = dt_utc + (datetime.now() - datetime.utcnow())
-                local_hours.append(dt_local.hour)
-            except:
-                pass
-
-        hour_counts = Counter(local_hours)
-        final_hourly_data = []
-        
-        for h, c in hour_counts.items():
-            final_hourly_data.append({"hour": h, "count": c})
+            recalculated_visits = []
+            for visit in visits:
+                visit_time = datetime.fromisoformat(visit["ts"])
+                # Get session visits for this specific visit
+                session_visits = query_db(
+                    "SELECT ts FROM visits WHERE link_id = ? AND session_id = (SELECT session_id FROM visits WHERE id = (SELECT id FROM visits WHERE link_id = ? AND ts = ? LIMIT 1))",
+                    [link["id"], link["id"], visit["ts"]]
+                )
                 
-        hourly_data = sorted(final_hourly_data, key=lambda x: x["hour"])
+                # Count recent visits and session visits
+                recent_visits = [v for v in session_visits if (now - datetime.fromisoformat(v["ts"])).total_seconds() < returning_window_hours * 3600]
+                session_count = len(session_visits)
+                
+                # Reclassify
+                if session_count >= engaged_threshold:
+                    new_behavior = "Highly engaged"
+                elif len(recent_visits) >= interested_threshold:
+                    new_behavior = "Interested"
+                else:
+                    new_behavior = "Curious"
+                
+                # Create updated visit dict
+                updated_visit = dict(visit)
+                updated_visit["behavior"] = new_behavior
+                recalculated_visits.append(updated_visit)
 
-        trust = trust_score(link["id"])
-        attention = attention_decay(list(reversed(recalculated_visits)))
+            # Calculate unique user behavior
+            # Group visits by ip_hash to analyze user behavior
+            user_behaviors = query_db(
+                """
+                SELECT 
+                    ip_hash,
+                    COUNT(*) as total_visits,
+                    SUM(CASE WHEN ts >= datetime('now', '-' || ? || ' hours') THEN 1 ELSE 0 END) as recent_visits
+                FROM visits 
+                WHERE link_id = ? 
+                GROUP BY ip_hash
+                """,
+                [returning_window_hours if behavior_rule else RETURNING_WINDOW_HOURS, link["id"]]
+            )
 
-        # Prepare payload for frontend
-        def safe_get(row, key):
-            return row[key] if row and row[key] is not None else 0
+            curious_users = 0
+            interested_users = 0
+            engaged_users = 0
 
-        analytics_payload = {
-            "intent": {
+            for user in user_behaviors:
+                is_engaged = user["total_visits"] >= (behavior_rule["engaged_threshold"] if behavior_rule else MULTI_CLICK_THRESHOLD)
+                is_interested = user["recent_visits"] >= (behavior_rule["interested_threshold"] if behavior_rule else 2)
+                
+                if is_engaged:
+                    engaged_users += 1
+                elif is_interested:
+                    interested_users += 1
+                else:
+                    curious_users += 1
+
+            # Calculate totals
+            total_visits = len(recalculated_visits)
+            # Use ip_hash for unique visitors instead of session_id for better persistence
+            unique_visitors_query = query_db("SELECT DISTINCT ip_hash FROM visits WHERE link_id = ?", [link["id"]])
+            unique_visitors = len(unique_visitors_query)
+            suspicious_count = sum(1 for v in recalculated_visits if v["is_suspicious"])
+            
+            # Update totals dictionary with USER counts instead of VISIT counts
+            curious_count = curious_users
+            interested_count = interested_users
+            engaged_count = engaged_users
+
+            totals = {
+                "total": total_visits,
+                "unique_visitors": unique_visitors,
+                "suspicious": suspicious_count,
                 "curious": curious_count,
                 "interested": interested_count,
                 "engaged": engaged_count
-            },
-            "quality": {
-                "human": total_visits - suspicious_count,
-                "suspicious": suspicious_count
-            },
-            "attention": attention,
-            "hourly": [dict(row) for row in hourly_data],
-            "daily": daily_data,
-            "region": [dict(row) for row in region_data],
-            "cities": [dict(row) for row in city_data],
-            "device": [dict(row) for row in device_data],
-            "weekend_insight": weekend_insight
-        }
+            }
+            
+            # Get region distribution (grouped by continent)
+            region_data_raw = query_db(
+                """
+                SELECT 
+                    CASE 
+                        WHEN country IS NOT NULL AND country != 'Unknown' THEN country
+                        ELSE region 
+                    END as location,
+                    COUNT(DISTINCT ip_hash) as count
+                FROM visits
+                WHERE link_id = ? AND (country IS NOT NULL OR region IS NOT NULL)
+                GROUP BY location
+                ORDER BY count DESC
+                """,
+                [link["id"]],
+            )
+            
+            # Group countries into continents
+            continent_counts = {}
+            for row in region_data_raw:
+                continent = country_to_continent(row['location'])
+                if continent in continent_counts:
+                    continent_counts[continent] += row['count']
+                else:
+                    continent_counts[continent] = row['count']
+            
+            # Convert back to list format for template
+            region_data = [{'location': continent, 'count': count} 
+                          for continent, count in sorted(continent_counts.items(), 
+                                                       key=lambda x: x[1], reverse=True)]
 
-        return render_template(
-            "analytics.html",
-            link=link,
-            visits=recalculated_visits,
-            totals=totals,
-            trust=trust,
-            attention=attention,
-            region_data=region_data,
-            city_data=city_data,
-            device_data=device_data,
-            hourly_data=hourly_data,
-            daily_data=daily_data,
-            weekend_insight=weekend_insight,
-            analytics_payload=analytics_payload,
-            behavior_rule=behavior_rule,
-        )
+            # Get city distribution
+            city_data = query_db(
+                """
+                SELECT city, country, COUNT(DISTINCT ip_hash) as count 
+                FROM visits 
+                WHERE link_id = ? AND city IS NOT NULL AND city != 'Unknown'
+                GROUP BY city, country
+                ORDER BY count DESC
+                LIMIT 20
+                """, 
+                [link["id"]]
+            )
+
+            # Get device distribution
+            device_data = query_db(
+                """
+                SELECT device, COUNT(DISTINCT ip_hash) as count
+                FROM visits
+                WHERE link_id = ? AND device IS NOT NULL
+                GROUP BY device
+                """,
+                [link["id"]],
+            )
+
+            # Get daily engagement trends (7-day pattern) using SQL
+            daily_raw = query_db(
+                """
+                SELECT 
+                    CASE CAST(strftime('%w', ts) AS INTEGER)
+                        WHEN 0 THEN 'Sun'
+                        WHEN 1 THEN 'Mon'
+                        WHEN 2 THEN 'Tue'
+                        WHEN 3 THEN 'Wed'
+                        WHEN 4 THEN 'Thu'
+                        WHEN 5 THEN 'Fri'
+                        WHEN 6 THEN 'Sat'
+                    END as day_name,
+                    COUNT(*) as count
+                FROM visits 
+                WHERE link_id = ?
+                GROUP BY strftime('%w', ts)
+                ORDER BY CAST(strftime('%w', ts) AS INTEGER)
+                """,
+                [link["id"]],
+            )
+            
+            # Ensure all days are present with 0 counts if no data
+            day_names = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+            daily_counts = {row['day_name']: row['count'] for row in daily_raw}
+            
+            daily_data = []
+            for day_name in day_names:
+                count = daily_counts.get(day_name, 0)
+                daily_data.append({"day": day_name, "count": count})
+            
+            # Calculate weekend vs weekday insight
+            weekday_total = sum(daily_counts.get(day, 0) for day in ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'])
+            weekend_total = sum(daily_counts.get(day, 0) for day in ['Sat', 'Sun'])
+            
+            weekend_insight = ""
+            if weekday_total > 0 and weekend_total > 0:
+                weekend_percentage = ((weekend_total - weekday_total) / weekday_total) * 100
+                if weekend_percentage > 20:
+                    weekend_insight = f"Weekend traffic shows {abs(weekend_percentage):.0f}% increase compared to weekdays, suggesting consumer-focused audience behavior."
+                elif weekend_percentage < -20:
+                    weekend_insight = f"Weekday traffic shows {abs(weekend_percentage):.0f}% increase compared to weekends, suggesting business-focused audience behavior."
+                else:
+                    weekend_insight = "Traffic is fairly consistent between weekdays and weekends."
+            else:
+                weekend_insight = "Gathering engagement pattern data..."
+
+            # Get raw timestamps for Python-side processing
+            hourly_raw = query_db(
+                """
+                SELECT ts FROM visits WHERE link_id = ?
+                """,
+                [link["id"]],
+            )
+            
+            # Process hourly distribution in Python
+            from collections import Counter
+            
+            local_hours = []
+            for row in hourly_raw:
+                try:
+                    dt_utc = datetime.fromisoformat(row["ts"])
+                    dt_local = dt_utc + (datetime.now() - datetime.utcnow())
+                    local_hours.append(dt_local.hour)
+                except:
+                    pass
+
+            hour_counts = Counter(local_hours)
+            final_hourly_data = []
+            
+            for h, c in hour_counts.items():
+                final_hourly_data.append({"hour": h, "count": c})
+                    
+            hourly_data = sorted(final_hourly_data, key=lambda x: x["hour"])
+
+            trust = trust_score(link["id"])
+            attention = attention_decay(list(reversed(recalculated_visits)))
+
+            # Prepare payload for frontend
+            def safe_get(row, key):
+                return row[key] if row and row[key] is not None else 0
+
+            analytics_payload = {
+                "intent": {
+                    "curious": curious_count,
+                    "interested": interested_count,
+                    "engaged": engaged_count
+                },
+                "quality": {
+                    "human": total_visits - suspicious_count,
+                    "suspicious": suspicious_count
+                },
+                "attention": attention,
+                "hourly": [dict(row) for row in hourly_data],
+                "daily": daily_data,
+                "region": [dict(row) for row in region_data],
+                "cities": [dict(row) for row in city_data],
+                "device": [dict(row) for row in device_data],
+                "weekend_insight": weekend_insight
+            }
+
+            return render_template(
+                "analytics.html",
+                link=link,
+                visits=recalculated_visits,
+                totals=totals,
+                trust=trust,
+                attention=attention,
+                region_data=region_data,
+                city_data=city_data,
+                device_data=device_data,
+                hourly_data=hourly_data,
+                daily_data=daily_data,
+                weekend_insight=weekend_insight,
+                analytics_payload=analytics_payload,
+                behavior_rule=behavior_rule,
+            )
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            flash(f"Error loading analytics: {str(e)}", "danger")
+            return redirect(url_for("index"))
 
     @app.route("/debug-analytics/<code>")
     def debug_analytics(code):
@@ -2538,10 +2554,6 @@ def detect_region_fallback(ip: str) -> str:
         return "Unknown"
 
 
-def allowed_file(filename):
-    """Check if the uploaded file has an allowed extension."""
-    return '.' in filename and \
-           filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 
 if __name__ == "__main__":
