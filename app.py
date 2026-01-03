@@ -7,13 +7,10 @@ import uuid
 import smtplib
 import csv
 import io
-try:
-    import geoip2.database
-    import geoip2.errors
-    GEOIP_AVAILABLE = True
-except ImportError:
-    GEOIP_AVAILABLE = False
-    print("Warning: geoip2 module not found. Region detection will fallback to API.")
+# GeoIP removed in favor of ip-api.com
+# import geoip2.database
+# import geoip2.errors
+GEOIP_AVAILABLE = False
 import requests
 import tarfile
 from email.message import EmailMessage
@@ -230,6 +227,10 @@ def create_app() -> Flask:
         # DDoS Protection Check
         ip_hash = hash_value(request.remote_addr or "unknown")
         
+        # Calculate IP hash for privacy-preserving tracking (kept for backward compatibility)
+        ip_hash = hash_value(request.remote_addr or "unknown")
+        ip_address = request.remote_addr or "unknown"
+
         # Check if link is under protection
         is_protected, protection_status = ddos_protection.is_link_protected(link["id"])
         if is_protected:
@@ -250,8 +251,8 @@ def create_app() -> Flask:
                                      message="Verification Required", 
                                      description="Please verify you're human to access this link.")
         
-        # Rate limiting check
-        rate_allowed, rate_status = ddos_protection.check_rate_limit(ip_hash, link["id"])
+        # Rate limiting check (using real IP)
+        rate_allowed, rate_status = ddos_protection.check_rate_limit(ip_address, link["id"])
         if not rate_allowed:
             if rate_status == 'rate_limited':
                 flash("Too many requests. Please slow down.", "warning")
@@ -279,11 +280,21 @@ def create_app() -> Flask:
         sess_id = ensure_session()
         user_agent = request.headers.get("User-Agent", "unknown")[:255]
         # Detect region and device
-        region = detect_region(request.remote_addr or "")
+        region = detect_region(ip_address)
         device = detect_device(user_agent)
         
         # Get detailed location information
-        location_info = get_detailed_location(request.remote_addr or "")
+        location_info = get_detailed_location(ip_address)
+        
+        # Parse browser and OS from user agent (Grabify-like details)
+        browser = parse_browser(user_agent)
+        os_name = parse_os(user_agent)
+        
+        # Get ISP info (async-friendly, with timeout)
+        isp_info = get_isp_info(ip_address)
+        
+        # Get referrer
+        referrer = request.headers.get("Referer", "no referrer")[:500]  # Limit length
         
         now = utcnow()
 
@@ -313,8 +324,8 @@ def create_app() -> Flask:
         execute_db(
             """
             INSERT INTO visits
-                (link_id, session_id, ip_hash, user_agent, ts, behavior, is_suspicious, target_url, region, device, country, city, latitude, longitude, timezone)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (link_id, session_id, ip_hash, user_agent, ts, behavior, is_suspicious, target_url, region, device, country, city, latitude, longitude, timezone, browser, os, isp, hostname, org, referrer, ip_address)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 link["id"],
@@ -332,6 +343,13 @@ def create_app() -> Flask:
                 location_info['latitude'],
                 location_info['longitude'],
                 location_info['timezone'],
+                browser,
+                os_name,
+                isp_info['isp'],
+                isp_info['hostname'],
+                isp_info['org'],
+                referrer,
+                ip_address,
             ],
         )
 
@@ -419,7 +437,7 @@ def create_app() -> Flask:
 
             visits = query_db(
                 """
-                SELECT ts, behavior, is_suspicious, region, device, country, city, latitude, longitude, timezone
+                SELECT ts, behavior, is_suspicious, region, device, country, city, latitude, longitude, timezone, browser, os, isp, hostname, org, referrer, user_agent, ip_hash, ip_address
                 FROM visits
                 WHERE link_id = ?
                 ORDER BY ts DESC
@@ -666,13 +684,43 @@ def create_app() -> Flask:
                     "suspicious": suspicious_count
                 },
                 "attention": attention,
-                "hourly": [dict(row) for row in hourly_data],
+                "hourly": hourly_data,  # Already list of dicts
                 "daily": daily_data,
-                "region": [dict(row) for row in region_data],
-                "cities": [dict(row) for row in city_data],
-                "device": [dict(row) for row in device_data],
+                "region": region_data,  # Already list of dicts
+                "cities": [dict(row) for row in city_data],  # SQLite Row objects
+                "device": [dict(row) for row in device_data],  # SQLite Row objects
                 "weekend_insight": weekend_insight
             }
+            
+            # Prepare detailed visitor list for Grabify-like log
+            detailed_visitors = []
+            for visit in recalculated_visits[:50]:  # Limit to 50 most recent
+                # Use real IP address if available, otherwise fallback to hashed IP (masked)
+                ip_display = visit.get('ip_address')
+                if not ip_display or ip_display == 'unknown':
+                     ip_display = f"hashed: {visit.get('ip_hash', '')[-8:]}" if visit.get('ip_hash') else 'N/A'
+
+                visitor = {
+                    'timestamp': visit.get('ts', ''),
+                    'ip_address': ip_display,
+                    'country': visit.get('country', 'Unknown'),
+                    'city': visit.get('city', 'Unknown'),
+                    'region': visit.get('region', 'Unknown'),
+                    'browser': visit.get('browser', 'Unknown'),
+                    'os': visit.get('os', 'Unknown'),
+                    'device': visit.get('device', 'Unknown'),
+                    'user_agent': visit.get('user_agent', 'Unknown'),
+                    'referrer': visit.get('referrer', 'no referrer'),
+                    'isp': visit.get('isp', 'Unknown'),
+                    'hostname': visit.get('hostname', 'Unknown'),
+                    'org': visit.get('org', 'Unknown'),
+                    'timezone': visit.get('timezone', 'Unknown'),
+                    'latitude': visit.get('latitude'),
+                    'longitude': visit.get('longitude'),
+                    'behavior': visit.get('behavior', 'Unknown'),
+                    'is_suspicious': visit.get('is_suspicious', False)
+                }
+                detailed_visitors.append(visitor)
 
             return render_template(
                 "analytics.html",
@@ -689,6 +737,7 @@ def create_app() -> Flask:
                 weekend_insight=weekend_insight,
                 analytics_payload=analytics_payload,
                 behavior_rule=behavior_rule,
+                detailed_visitors=detailed_visitors,
             )
         except Exception as e:
             import traceback
@@ -1991,6 +2040,18 @@ def ensure_db():
     ensure_column("personalized_ads", "grid_position", "grid_position INTEGER DEFAULT 1")
     ensure_column("personalized_ads", "ad_type", "ad_type TEXT DEFAULT 'custom'")
     ensure_column("personalized_ads", "image_filename", "image_filename TEXT")
+    
+    # New columns for Grabify-like detailed visitor tracking
+    ensure_column("visits", "browser", "browser TEXT")
+    ensure_column("visits", "os", "os TEXT")
+    ensure_column("visits", "isp", "isp TEXT")
+    ensure_column("visits", "hostname", "hostname TEXT")
+    ensure_column("visits", "org", "org TEXT")
+    ensure_column("visits", "referrer", "referrer TEXT")
+    ensure_column("visits", "ip_address", "ip_address TEXT")
+    ensure_column("ddos_events", "ip_address", "ip_address TEXT")
+    ensure_column("rate_limits", "ip_address", "ip_address TEXT")
+    
     conn.commit()
     conn.close()
 
@@ -2226,44 +2287,52 @@ def detect_device(user_agent: str) -> str:
         return "Desktop"
 
 
-def detect_region(ip: str) -> str:
-    """Detect region from IP address using MaxMind GeoIP."""
+# Simple in-memory cache for geolocation (IP -> dict)
+# In production, use Redis or database
+geo_cache = {}
+
+def get_api_location(ip: str) -> dict:
+    """Get location data from ip-api.com with caching."""
     if not ip or ip == "unknown" or ip.startswith("127.") or ip.startswith("192.168.") or ip.startswith("10."):
-        return "Local/Private"
+        return {'status': 'private'}
+    
+    # Check cache
+    if ip in geo_cache:
+        # crude expiration check could be added here
+        return geo_cache[ip]
     
     try:
-        # Try to use MaxMind GeoIP database
-        if GEOIP_AVAILABLE and os.path.exists(GEOIP_DB_PATH):
-            with geoip2.database.Reader(GEOIP_DB_PATH) as reader:
-                try:
-                    response = reader.city(ip)
-                    
-                    # Get country and city information
-                    country = response.country.name or "Unknown Country"
-                    city = response.city.name or ""
-                    
-                    # Return formatted location
-                    if city:
-                        return f"{city}, {country}"
-                    else:
-                        return country
-                        
-                except geoip2.errors.AddressNotFoundError:
-                    # IP not found in database, use fallback
-                    pass
-                except Exception as e:
-                    print(f"GeoIP lookup error: {e}")
-        
-        # Fallback to simple region detection if GeoIP fails
-        return detect_region_fallback(ip)
-        
+        # http://ip-api.com/json/{ip}?fields=status,message,country,countryCode,region,regionName,city,zip,lat,lon,timezone,isp,org,as
+        response = requests.get(f"http://ip-api.com/json/{ip}?fields=status,message,country,countryCode,region,regionName,city,zip,lat,lon,timezone,isp,org,as", timeout=2)
+        if response.status_code == 200:
+            data = response.json()
+            if data['status'] == 'success':
+                geo_cache[ip] = data
+                return data
     except Exception as e:
-        print(f"Error in detect_region: {e}")
-        return detect_region_fallback(ip)
+        print(f"API Geolocation error for {ip}: {e}")
+        
+    return {'status': 'fail'}
+
+def detect_region(ip: str) -> str:
+    """Detect region from IP address using ip-api.com."""
+    data = get_api_location(ip)
+    
+    if data.get('status') == 'private':
+        return "Local/Private"
+        
+    if data.get('status') == 'success':
+        city = data.get('city', '')
+        country = data.get('country', 'Unknown Country')
+        if city:
+            return f"{city}, {country}"
+        return country
+        
+    return "Unknown"
 
 
 def get_detailed_location(ip: str) -> dict:
-    """Get detailed location information including country, city, and coordinates."""
+    """Get detailed location information including country, city, coordinates using ip-api.com."""
     location_info = {
         'country': 'Unknown',
         'city': 'Unknown', 
@@ -2273,39 +2342,20 @@ def get_detailed_location(ip: str) -> dict:
         'timezone': None
     }
     
-    if not ip or ip == "unknown" or ip.startswith("127.") or ip.startswith("192.168.") or ip.startswith("10."):
+    data = get_api_location(ip)
+    
+    if data.get('status') == 'private':
         location_info['country'] = 'Local/Private'
         location_info['region'] = 'Local/Private'
         return location_info
-    
-    try:
-        if os.path.exists(GEOIP_DB_PATH):
-            with geoip2.database.Reader(GEOIP_DB_PATH) as reader:
-                try:
-                    response = reader.city(ip)
-                    
-                    location_info['country'] = response.country.name or 'Unknown'
-                    location_info['city'] = response.city.name or 'Unknown'
-                    location_info['region'] = response.subdivisions.most_specific.name or 'Unknown'
-                    
-                    if response.location.latitude and response.location.longitude:
-                        location_info['latitude'] = float(response.location.latitude)
-                        location_info['longitude'] = float(response.location.longitude)
-                    
-                    if response.location.time_zone:
-                        location_info['timezone'] = response.location.time_zone
-                        
-                except geoip2.errors.AddressNotFoundError:
-                    # Use fallback for unknown IPs
-                    fallback_region = detect_region_fallback(ip)
-                    location_info['country'] = fallback_region
-                    location_info['region'] = fallback_region
-                    
-    except Exception as e:
-        print(f"Error getting detailed location: {e}")
-        fallback_region = detect_region_fallback(ip)
-        location_info['country'] = fallback_region
-        location_info['region'] = fallback_region
+        
+    if data.get('status') == 'success':
+        location_info['country'] = data.get('country', 'Unknown')
+        location_info['city'] = data.get('city', 'Unknown')
+        location_info['region'] = data.get('regionName', 'Unknown')
+        location_info['latitude'] = data.get('lat')
+        location_info['longitude'] = data.get('lon')
+        location_info['timezone'] = data.get('timezone')
     
     return location_info
 
@@ -2552,6 +2602,167 @@ def detect_region_fallback(ip: str) -> str:
 
     except (ValueError, IndexError):
         return "Unknown"
+
+def parse_browser(user_agent: str) -> str:
+    """Parse browser name and version from User-Agent string."""
+    if not user_agent or user_agent == "unknown":
+        return "Unknown"
+    
+    ua = user_agent.lower()
+    
+    # Check for common browsers (order matters - more specific first)
+    if "edg/" in ua or "edge/" in ua:
+        # Extract Edge version
+        import re
+        match = re.search(r'edg[e]?/(\d+[\.\d]*)', ua)
+        version = match.group(1) if match else ""
+        return f"Microsoft Edge ({version})" if version else "Microsoft Edge"
+    
+    if "opr/" in ua or "opera" in ua:
+        import re
+        match = re.search(r'(?:opr|opera)[/\s](\d+[\.\d]*)', ua)
+        version = match.group(1) if match else ""
+        return f"Opera ({version})" if version else "Opera"
+    
+    if "chrome" in ua and "chromium" not in ua:
+        import re
+        match = re.search(r'chrome/(\d+[\.\d]*)', ua)
+        version = match.group(1) if match else ""
+        return f"Chrome ({version})" if version else "Chrome"
+    
+    if "firefox" in ua:
+        import re
+        match = re.search(r'firefox/(\d+[\.\d]*)', ua)
+        version = match.group(1) if match else ""
+        return f"Firefox ({version})" if version else "Firefox"
+    
+    if "safari" in ua and "chrome" not in ua:
+        import re
+        match = re.search(r'version/(\d+[\.\d]*)', ua)
+        version = match.group(1) if match else ""
+        return f"Safari ({version})" if version else "Safari"
+    
+    if "msie" in ua or "trident" in ua:
+        import re
+        match = re.search(r'(?:msie |rv:)(\d+[\.\d]*)', ua)
+        version = match.group(1) if match else ""
+        return f"Internet Explorer ({version})" if version else "Internet Explorer"
+    
+    if "chromium" in ua:
+        return "Chromium"
+    
+    return "Unknown Browser"
+
+
+def parse_os(user_agent: str) -> str:
+    """Parse operating system from User-Agent string."""
+    if not user_agent or user_agent == "unknown":
+        return "Unknown"
+    
+    ua = user_agent.lower()
+    
+    # Windows versions
+    if "windows nt 10.0" in ua:
+        if "windows nt 10.0; win64" in ua:
+            return "Windows 10/11 x64"
+        return "Windows 10/11"
+    if "windows nt 6.3" in ua:
+        return "Windows 8.1"
+    if "windows nt 6.2" in ua:
+        return "Windows 8"
+    if "windows nt 6.1" in ua:
+        return "Windows 7"
+    if "windows nt 6.0" in ua:
+        return "Windows Vista"
+    if "windows nt 5.1" in ua or "windows xp" in ua:
+        return "Windows XP"
+    if "windows" in ua:
+        return "Windows"
+    
+    # macOS
+    if "mac os x" in ua:
+        import re
+        match = re.search(r'mac os x (\d+[_\.]\d+)', ua)
+        if match:
+            version = match.group(1).replace('_', '.')
+            return f"macOS {version}"
+        return "macOS"
+    
+    # iOS
+    if "iphone" in ua:
+        import re
+        match = re.search(r'iphone os (\d+[_\.]\d+)', ua)
+        if match:
+            version = match.group(1).replace('_', '.')
+            return f"iOS {version} (iPhone)"
+        return "iOS (iPhone)"
+    if "ipad" in ua:
+        return "iOS (iPad)"
+    
+    # Android
+    if "android" in ua:
+        import re
+        match = re.search(r'android (\d+[\.\d]*)', ua)
+        if match:
+            return f"Android {match.group(1)}"
+        return "Android"
+    
+    # Linux distributions
+    if "ubuntu" in ua:
+        return "Ubuntu Linux"
+    if "fedora" in ua:
+        return "Fedora Linux"
+    if "linux" in ua:
+        return "Linux"
+    
+    # Chrome OS
+    if "cros" in ua:
+        return "Chrome OS"
+    
+    return "Unknown OS"
+
+
+def get_isp_info(ip: str) -> dict:
+    """Get ISP and hostname via DNS reverse lookup and API fallback."""
+    result = {
+        'isp': 'Unknown',
+        'hostname': 'Unknown',
+        'org': 'Unknown'
+    }
+    
+    if not ip or ip == "unknown" or ip.startswith("127.") or ip.startswith("192.168.") or ip.startswith("10."):
+        result['isp'] = 'Local Network'
+        result['hostname'] = 'localhost'
+        return result
+    
+    # Try DNS reverse lookup for hostname
+    try:
+        import socket
+        hostname = socket.gethostbyaddr(ip)[0]
+        result['hostname'] = hostname
+        
+        # Extract potential ISP from hostname
+        # e.g., "user.isp.com" -> "isp.com"
+        parts = hostname.split('.')
+        if len(parts) >= 2:
+            result['isp'] = '.'.join(parts[-2:])
+    except (socket.herror, socket.gaierror, socket.timeout):
+        pass
+    
+    # Try ip-api.com for accurate ISP info (free tier, no API key needed)
+    try:
+        import requests
+        response = requests.get(f"http://ip-api.com/json/{ip}?fields=isp,org,as", timeout=2)
+        if response.status_code == 200:
+            data = response.json()
+            if data.get('isp'):
+                result['isp'] = data['isp']
+            if data.get('org'):
+                result['org'] = data['org']
+    except Exception:
+        pass
+    
+    return result
 
 
 

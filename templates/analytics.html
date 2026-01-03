@@ -398,12 +398,210 @@
         </div>
       </div>
     </section>
+
+    <!-- Detailed Visitor Log Section (Grabify-like) -->
+    <section class="mb-4">
+      <div class="card shadow-sm">
+        <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center">
+          <div>
+            <h4 class="h6 fw-bold mb-0">
+              <svg width="18" height="18" fill="currentColor" class="me-2" viewBox="0 0 16 16">
+                <path
+                  d="M8 8a3 3 0 1 0 0-6 3 3 0 0 0 0 6zm2-3a2 2 0 1 1-4 0 2 2 0 0 1 4 0zm4 8c0 1-1 1-1 1H3s-1 0-1-1 1-4 6-4 6 3 6 4zm-1-.004c-.001-.246-.154-.986-.832-1.664C11.516 10.68 10.289 10 8 10c-2.29 0-3.516.68-4.168 1.332-.678.678-.83 1.418-.832 1.664h10z" />
+              </svg>
+              Detailed Visitor Log
+            </h4>
+            <p class="small text-muted mb-0 mt-1">Click on any row to view full details</p>
+          </div>
+          <span class="badge bg-primary">{{ detailed_visitors|length }} visitors</span>
+        </div>
+        <div class="card-body p-0">
+          <div class="table-responsive">
+            <table class="table table-hover table-striped mb-0">
+              <thead class="table-light">
+                <tr>
+                  <th class="small fw-bold">Time</th>
+                  <th class="small fw-bold">IP Address</th>
+                  <th class="small fw-bold">Location</th>
+                  <th class="small fw-bold">Browser</th>
+                  <th class="small fw-bold">OS</th>
+                  <th class="small fw-bold">ISP</th>
+                  <th class="small fw-bold text-center">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for visitor in detailed_visitors %}
+                <tr class="visitor-row" style="cursor: pointer;" data-visitor='{{ visitor | tojson }}'
+                  onclick="showVisitorModal(this)">
+                  <td class="small">{{ visitor.timestamp[:19] }}</td>
+                  <td class="small font-monospace">{{ visitor.ip_address }}</td>
+                  <td class="small">
+                    {% if visitor.city and visitor.city != 'Unknown' %}
+                    {{ visitor.city }}, {{ visitor.country }}
+                    {% else %}
+                    {{ visitor.country }}
+                    {% endif %}
+                  </td>
+                  <td class="small">{{ visitor.browser[:30] }}{% if visitor.browser|length > 30 %}...{% endif %}</td>
+                  <td class="small">{{ visitor.os }}</td>
+                  <td class="small">{{ visitor.isp[:25] }}{% if visitor.isp|length > 25 %}...{% endif %}</td>
+                  <td class="text-center">
+                    <button class="btn btn-sm btn-outline-primary"
+                      onclick="event.stopPropagation(); showVisitorModal(this.closest('tr'))">
+                      <svg width="14" height="14" fill="currentColor" viewBox="0 0 16 16">
+                        <path d="M10.5 8a2.5 2.5 0 1 1-5 0 2.5 2.5 0 0 1 5 0z" />
+                        <path
+                          d="M0 8s3-5.5 8-5.5S16 8 16 8s-3 5.5-8 5.5S0 8 0 8zm8 3.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7z" />
+                      </svg>
+                    </button>
+                  </td>
+                </tr>
+                {% else %}
+                <tr>
+                  <td colspan="7" class="text-center py-4 text-muted">
+                    <svg width="48" height="48" fill="currentColor" class="mb-2 opacity-50" viewBox="0 0 16 16">
+                      <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z" />
+                      <path
+                        d="M8 4a.5.5 0 0 1 .5.5v3h3a.5.5 0 0 1 0 1h-3v3a.5.5 0 0 1-1 0v-3h-3a.5.5 0 0 1 0-1h3v-3A.5.5 0 0 1 8 4z" />
+                    </svg>
+                    <p class="mb-0">No visitor data yet. Share your link to start tracking!</p>
+                  </td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
   </main>
+
+  <!-- Visitor Details Modal (Grabify-like Advanced Log) -->
+  <div class="modal fade" id="visitorModal" tabindex="-1" aria-labelledby="visitorModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg">
+      <div class="modal-content">
+        <div class="modal-header bg-dark text-white">
+          <h5 class="modal-title" id="visitorModalLabel">
+            <svg width="20" height="20" fill="currentColor" class="me-2" viewBox="0 0 16 16">
+              <path
+                d="M8 8a3 3 0 1 0 0-6 3 3 0 0 0 0 6zm2-3a2 2 0 1 1-4 0 2 2 0 0 1 4 0zm4 8c0 1-1 1-1 1H3s-1 0-1-1 1-4 6-4 6 3 6 4zm-1-.004c-.001-.246-.154-.986-.832-1.664C11.516 10.68 10.289 10 8 10c-2.29 0-3.516.68-4.168 1.332-.678.678-.83 1.418-.832 1.664h10z" />
+            </svg>
+            Advanced Log
+          </h5>
+          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body p-0">
+          <table class="table table-bordered mb-0">
+            <tbody>
+              <tr>
+                <th class="bg-light" style="width: 30%;">IP Address</th>
+                <td id="modal-ip" class="font-monospace"></td>
+              </tr>
+              <tr>
+                <th class="bg-light">Country</th>
+                <td id="modal-country"></td>
+              </tr>
+              <tr>
+                <th class="bg-light">City</th>
+                <td id="modal-city"></td>
+              </tr>
+              <tr>
+                <th class="bg-light">Browser</th>
+                <td id="modal-browser"></td>
+              </tr>
+              <tr>
+                <th class="bg-light">Operating System</th>
+                <td id="modal-os"></td>
+              </tr>
+              <tr>
+                <th class="bg-light">User Agent</th>
+                <td id="modal-useragent" class="small font-monospace text-break"></td>
+              </tr>
+              <tr>
+                <th class="bg-light">Referring URL</th>
+                <td id="modal-referrer"></td>
+              </tr>
+              <tr>
+                <th class="bg-light">Host Name</th>
+                <td id="modal-hostname" class="font-monospace"></td>
+              </tr>
+              <tr>
+                <th class="bg-light">ISP</th>
+                <td id="modal-isp"></td>
+              </tr>
+              <tr>
+                <th class="bg-light">Organization</th>
+                <td id="modal-org"></td>
+              </tr>
+              <tr>
+                <th class="bg-light">Timezone</th>
+                <td id="modal-timezone"></td>
+              </tr>
+              <tr>
+                <th class="bg-light">Device Type</th>
+                <td id="modal-device"></td>
+              </tr>
+              <tr>
+                <th class="bg-light">Behavior</th>
+                <td id="modal-behavior"></td>
+              </tr>
+              <tr>
+                <th class="bg-light">Timestamp</th>
+                <td id="modal-timestamp"></td>
+              </tr>
+              <tr>
+                <th class="bg-light">Coordinates</th>
+                <td id="modal-coords"></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <!-- Data for JavaScript -->
   <script>
     // Use the pre-constructed payload from the backend
     window.analyticsData = {{ analytics_payload | tojson }};
+
+    // Function to show visitor details modal
+    function showVisitorModal(row) {
+      const visitor = JSON.parse(row.dataset.visitor);
+
+      document.getElementById('modal-ip').textContent = visitor.ip_address || 'N/A';
+      document.getElementById('modal-country').textContent = visitor.country || 'Unknown';
+      document.getElementById('modal-city').textContent = visitor.city || 'Unknown';
+      document.getElementById('modal-browser').textContent = visitor.browser || 'Unknown';
+      document.getElementById('modal-os').textContent = visitor.os || 'Unknown';
+      document.getElementById('modal-useragent').textContent = visitor.user_agent || 'Unknown';
+      document.getElementById('modal-referrer').textContent = visitor.referrer || 'no referrer';
+      document.getElementById('modal-hostname').textContent = visitor.hostname || 'Unknown';
+      document.getElementById('modal-isp').textContent = visitor.isp || 'Unknown';
+      document.getElementById('modal-org').textContent = visitor.org || 'Unknown';
+      document.getElementById('modal-timezone').textContent = visitor.timezone || 'Unknown';
+      document.getElementById('modal-device').textContent = visitor.device || 'Unknown';
+      document.getElementById('modal-behavior').textContent = visitor.behavior || 'Unknown';
+      document.getElementById('modal-timestamp').textContent = visitor.timestamp || 'Unknown';
+
+      // Coordinates
+      if (visitor.latitude && visitor.longitude) {
+        document.getElementById('modal-coords').innerHTML =
+          `${visitor.latitude}, ${visitor.longitude} 
+           <a href="https://www.google.com/maps?q=${visitor.latitude},${visitor.longitude}" target="_blank" class="ms-2 btn btn-sm btn-outline-primary">
+             View on Map
+           </a>`;
+      } else {
+        document.getElementById('modal-coords').textContent = 'Not available';
+      }
+
+      // Show the modal
+      const modal = new bootstrap.Modal(document.getElementById('visitorModal'));
+      modal.show();
+    }
   </script>
 
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
