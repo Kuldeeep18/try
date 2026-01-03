@@ -15,6 +15,8 @@ import requests
 import tarfile
 from email.message import EmailMessage
 from datetime import datetime, timedelta
+# Import threading for async IP fetching if needed, though we'll keep it simple for now
+import threading
 from functools import wraps
 from werkzeug.utils import secure_filename
 
@@ -225,11 +227,11 @@ def create_app() -> Flask:
             abort(404)
 
         # DDoS Protection Check
-        ip_hash = hash_value(request.remote_addr or "unknown")
+        # Use robust IP detection
+        ip_address = get_client_ip()
         
-        # Calculate IP hash for privacy-preserving tracking (kept for backward compatibility)
-        ip_hash = hash_value(request.remote_addr or "unknown")
-        ip_address = request.remote_addr or "unknown"
+        # Calculate IP hash for privacy-preserving tracking
+        ip_hash = hash_value(ip_address)
 
         # Check if link is under protection
         is_protected, protection_status = ddos_protection.is_link_protected(link["id"])
@@ -2291,10 +2293,46 @@ def detect_device(user_agent: str) -> str:
 # In production, use Redis or database
 geo_cache = {}
 
+def get_client_ip():
+    """
+    Get the best available client IP address, checking proxy headers.
+    """
+    # Check X-Forwarded-For (standard for proxies)
+    if request.headers.getlist("X-Forwarded-For"):
+        return request.headers.getlist("X-Forwarded-For")[0].split(',')[0].strip()
+    
+    # Check X-Real-IP (common alternative)
+    if request.headers.get("X-Real-IP"):
+        return request.headers.get("X-Real-IP")
+        
+    # Fallback to direct connection
+    return request.remote_addr or "unknown"
+
+def get_public_ip_fallback():
+    """
+    Fetch the server's own public IP.
+    Useful when running locally to see real geolocation data.
+    """
+    try:
+        response = requests.get('https://api.ipify.org', timeout=3)
+        if response.status_code == 200:
+            return response.text.strip()
+    except Exception as e:
+        print(f"Could not fetch public IP: {e}")
+    return None
+
 def get_api_location(ip: str) -> dict:
     """Get location data from ip-api.com with caching."""
+    
+    # Handle private IPs by trying to resolve public IP (for dev/testing)
     if not ip or ip == "unknown" or ip.startswith("127.") or ip.startswith("192.168.") or ip.startswith("10."):
-        return {'status': 'private'}
+        print(f"Private IP detected ({ip}). Attempting to fetch public IP for geolocation...", flush=True)
+        public_ip = get_public_ip_fallback()
+        if public_ip:
+            print(f"Using public IP {public_ip} instead of {ip}", flush=True)
+            ip = public_ip
+        else:
+            return {'status': 'private'}
     
     # Check cache
     if ip in geo_cache:
@@ -2731,9 +2769,14 @@ def get_isp_info(ip: str) -> dict:
     }
     
     if not ip or ip == "unknown" or ip.startswith("127.") or ip.startswith("192.168.") or ip.startswith("10."):
-        result['isp'] = 'Local Network'
-        result['hostname'] = 'localhost'
-        return result
+        # Try to get public IP for dev mode to show real ISP
+        public_ip = get_public_ip_fallback()
+        if public_ip:
+            ip = public_ip
+        else:
+            result['isp'] = 'Local Network'
+            result['hostname'] = 'localhost'
+            return result
     
     # Try DNS reverse lookup for hostname
     try:
@@ -2766,7 +2809,7 @@ def get_isp_info(ip: str) -> dict:
 
 
 
-
+apple = create_app()
 if __name__ == "__main__":
-    app = create_app()
-    app.run(debug=True, port=5000, host="0.0.0.0")
+   
+    apple.run(debug=True, port=5000, host="0.0.0.0")
