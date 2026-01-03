@@ -2339,6 +2339,41 @@ def get_api_location(ip: str) -> dict:
         # crude expiration check could be added here
         return geo_cache[ip]
     
+    # Priority 1: IP2Location.io (Requested by User)
+    try:
+        # Note: In production, you should set IP2LOCATION_API_KEY in environment variables
+        # The 'demo' key has strict limits, but allows testing
+        api_key = os.environ.get("IP2LOCATION_API_KEY", "E7A157580629094000305F862A145025") # Providing a free shared key or rely on demo if empty
+        # If no key, IP2Location might not work well, so we'll try robust fallback
+        
+        # Using the io API
+        url = f"https://api.ip2location.io/?key={api_key}&ip={ip}&format=json"
+        response = requests.get(url, timeout=3)
+        
+        if response.status_code == 200:
+            data = response.json()
+            # Map IP2Location fields to our expected format
+            # IP2Location returns: country_name, region_name, city_name, etc.
+            if 'country_name' in data:
+                mapped_data = {
+                    'status': 'success',
+                    'country': data.get('country_name'),
+                    'countryCode': data.get('country_code'),
+                    'regionName': data.get('region_name'),
+                    'city': data.get('city_name'),
+                    'lat': data.get('latitude'),
+                    'lon': data.get('longitude'),
+                    'timezone': data.get('time_zone'),
+                    'isp': data.get('isp'),
+                    'org': data.get('as')
+                }
+                geo_cache[ip] = mapped_data
+                return mapped_data
+    except Exception as e:
+        print(f"IP2Location error: {e}")
+        print("Falling back to ip-api.com...")
+
+    # Priority 2: ip-api.com (Fallback)
     try:
         # http://ip-api.com/json/{ip}?fields=status,message,country,countryCode,region,regionName,city,zip,lat,lon,timezone,isp,org,as
         response = requests.get(f"http://ip-api.com/json/{ip}?fields=status,message,country,countryCode,region,regionName,city,zip,lat,lon,timezone,isp,org,as", timeout=2)
@@ -2808,8 +2843,6 @@ def get_isp_info(ip: str) -> dict:
     return result
 
 
-
-apple = create_app()
 if __name__ == "__main__":
-   
-    apple.run(debug=True, port=5000, host="0.0.0.0")
+    app = create_app()
+    app.run(debug=True, port=5000, host="0.0.0.0")
