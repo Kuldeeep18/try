@@ -7,8 +7,13 @@ import uuid
 import smtplib
 import csv
 import io
-import geoip2.database
-import geoip2.errors
+try:
+    import geoip2.database
+    import geoip2.errors
+    GEOIP_AVAILABLE = True
+except ImportError:
+    GEOIP_AVAILABLE = False
+    print("Warning: geoip2 module not found. Region detection will fallback to API.")
 import requests
 import tarfile
 from email.message import EmailMessage
@@ -82,14 +87,6 @@ def download_geoip_database():
         print(f"Failed to download GeoIP database: {e}")
         print("Using fallback location detection...")
         return False
-
-
-def get_client_ip():
-    """Get the real client IP, handling proxies like PythonAnywhere."""
-    if request.headers.get("X-Forwarded-For"):
-        # The first IP in the list is the original client IP
-        return request.headers.get("X-Forwarded-For").split(",")[0].strip()
-    return request.remote_addr or "unknown"
 
 
 def create_app() -> Flask:
@@ -222,7 +219,7 @@ def create_app() -> Flask:
             abort(404)
 
         # DDoS Protection Check
-        ip_hash = hash_value(get_client_ip() or "unknown")
+        ip_hash = hash_value(request.remote_addr or "unknown")
         
         # Check if link is under protection
         is_protected, protection_status = ddos_protection.is_link_protected(link["id"])
@@ -273,11 +270,11 @@ def create_app() -> Flask:
         sess_id = ensure_session()
         user_agent = request.headers.get("User-Agent", "unknown")[:255]
         # Detect region and device
-        region = detect_region(get_client_ip() or "")
+        region = detect_region(request.remote_addr or "")
         device = detect_device(user_agent)
         
         # Get detailed location information
-        location_info = get_detailed_location(get_client_ip() or "")
+        location_info = get_detailed_location(request.remote_addr or "")
         
         now = utcnow()
 
@@ -410,80 +407,99 @@ def create_app() -> Flask:
                 [g.user["id"]], one=True
             )
 
-        # Get ALL visits for the charts (not limited to 200)
-        all_visits_for_charts = query_db(
+        visits = query_db(
             """
             SELECT ts, behavior, is_suspicious, region, device, country, city, latitude, longitude, timezone
             FROM visits
             WHERE link_id = ?
             ORDER BY ts DESC
+            LIMIT 200
             """,
             [link["id"]],
         )
 
-        # Still limit to 200 for the "Recent Visits" table to maintain performance
-        visits = all_visits_for_charts[:200]
-
-        # Recalculate behavior classifications with custom rules using ALL visits for charts
+        # Recalculate behavior classifications with custom rules
         now = utcnow()
-        recalculated_visits_all = []
-        
-        # Performance optimization: if there are many visits, we might want to be careful here
-        # but for behavioral classification we need session history.
-        # Actually, let's just use the data from the DB if possible, 
-        # but the current app re-classifies on the fly in the analytics route.
-        
-        # To avoid N+1 queries in the loop below, let's pre-fetch session counts
-        session_counts_raw = query_db(
-            f"SELECT session_id, COUNT(*) as count FROM visits WHERE link_id = ? GROUP BY session_id",
-            [link["id"]]
-        )
-        session_counts = {row["session_id"]: row["count"] for row in session_counts_raw}
-
-        for visit in all_visits_for_charts:
+        recalculated_visits = []
+        for visit in visits:
+            visit_time = datetime.fromisoformat(visit["ts"])
+            # Get session visits for this specific visit
+            session_visits = query_db(
+                "SELECT ts FROM visits WHERE link_id = ? AND session_id = (SELECT session_id FROM visits WHERE id = (SELECT id FROM visits WHERE link_id = ? AND ts = ? LIMIT 1))",
+                [link["id"], link["id"], visit["ts"]]
+            )
+            
             # Reclassify behavior using custom rules
             if behavior_rule:
+                returning_window_hours = behavior_rule["returning_window_hours"]
                 interested_threshold = behavior_rule["interested_threshold"]
                 engaged_threshold = behavior_rule["engaged_threshold"]
             else:
+                returning_window_hours = RETURNING_WINDOW_HOURS
                 interested_threshold = 2
                 engaged_threshold = MULTI_CLICK_THRESHOLD
             
-            # Use pre-fetched session count
-            # Note: The original code used a complex 'recent_visits' check with a sliding window
-            # but for the summary charts we can simplify to session count or keep it as is.
-            # Let's keep it simple for the summary but consistent.
+            # Count recent visits and session visits
+            recent_visits = [v for v in session_visits if (now - datetime.fromisoformat(v["ts"])).total_seconds() < returning_window_hours * 3600]
+            session_count = len(session_visits)
             
-            session_id_query = query_db("SELECT session_id FROM visits WHERE link_id = ? AND ts = ? LIMIT 1", [link["id"], visit["ts"]], one=True)
-            sess_id = session_id_query["session_id"] if session_id_query else "unknown"
-            count = session_counts.get(sess_id, 1)
-            
-            if count >= engaged_threshold:
+            # Reclassify
+            if session_count >= engaged_threshold:
                 new_behavior = "Highly engaged"
-            elif count >= interested_threshold:
+            elif len(recent_visits) >= interested_threshold:
                 new_behavior = "Interested"
             else:
                 new_behavior = "Curious"
             
+            # Create updated visit dict
             updated_visit = dict(visit)
             updated_visit["behavior"] = new_behavior
-            recalculated_visits_all.append(updated_visit)
+            recalculated_visits.append(updated_visit)
 
-        # For the table, we only need the first 200 recalculated visits
-        recalculated_visits = recalculated_visits_all[:200]
+        # Calculate unique user behavior
+        # Group visits by ip_hash to analyze user behavior
+        user_behaviors = query_db(
+            """
+            SELECT 
+                ip_hash,
+                COUNT(*) as total_visits,
+                SUM(CASE WHEN ts >= datetime('now', '-' || ? || ' hours') THEN 1 ELSE 0 END) as recent_visits
+            FROM visits 
+            WHERE link_id = ? 
+            GROUP BY ip_hash
+            """,
+            [returning_window_hours if behavior_rule else RETURNING_WINDOW_HOURS, link["id"]]
+        )
 
-        # Calculate totals using ALL visits
-        total_visits_all = len(all_visits_for_charts)
-        unique_visitors = len(set(v["session_id"] for v in query_db("SELECT session_id FROM visits WHERE link_id = ?", [link["id"]])))
+        curious_users = 0
+        interested_users = 0
+        engaged_users = 0
+
+        for user in user_behaviors:
+            is_engaged = user["total_visits"] >= (behavior_rule["engaged_threshold"] if behavior_rule else MULTI_CLICK_THRESHOLD)
+            is_interested = user["recent_visits"] >= (behavior_rule["interested_threshold"] if behavior_rule else 2)
+            
+            if is_engaged:
+                engaged_users += 1
+            elif is_interested:
+                interested_users += 1
+            else:
+                curious_users += 1
+
+        # Calculate totals
+        total_visits = len(recalculated_visits)
+        # Use ip_hash for unique visitors instead of session_id for better persistence
+        unique_visitors_query = query_db("SELECT DISTINCT ip_hash FROM visits WHERE link_id = ?", [link["id"]])
+        unique_visitors = len(unique_visitors_query)
+        suspicious_count = sum(1 for v in recalculated_visits if v["is_suspicious"])
         
-        # Behavior counts
-        suspicious_count = sum(1 for v in all_visits_for_charts if v["is_suspicious"])
-        curious_count = sum(1 for v in recalculated_visits_all if v["behavior"] == "Curious")
-        interested_count = sum(1 for v in recalculated_visits_all if v["behavior"] == "Interested")
-        engaged_count = sum(1 for v in recalculated_visits_all if v["behavior"] == "Highly engaged")
+        # Update totals dictionary with USER counts instead of VISIT counts
+        curious_count = curious_users
+        interested_count = interested_users
+        engaged_count = engaged_users
 
         totals = {
-            "total": total_visits_all,
+            "total": total_visits,
             "unique_visitors": unique_visitors,
             "suspicious": suspicious_count,
             "curious": curious_count,
@@ -491,61 +507,105 @@ def create_app() -> Flask:
             "engaged": engaged_count
         }
         
-        # Get region distribution (grouped by continent) using ALL visits
-        region_counts = {}
-        for v in all_visits_for_charts:
-            loc = v["country"] if v["country"] and v["country"] != "Unknown" else v["region"]
-            if loc:
-                region_counts[loc] = region_counts.get(loc, 0) + 1
+        # Get region distribution (grouped by continent)
+        region_data_raw = query_db(
+            """
+            SELECT 
+                CASE 
+                    WHEN country IS NOT NULL AND country != 'Unknown' THEN country
+                    ELSE region 
+                END as location,
+                COUNT(DISTINCT ip_hash) as count
+            FROM visits
+            WHERE link_id = ? AND (country IS NOT NULL OR region IS NOT NULL)
+            GROUP BY location
+            ORDER BY count DESC
+            """,
+            [link["id"]],
+        )
         
+        # Group countries into continents
         continent_counts = {}
-        for loc, count in region_counts.items():
-            continent = country_to_continent(loc)
-            continent_counts[continent] = continent_counts.get(continent, 0) + count
+        for row in region_data_raw:
+            continent = country_to_continent(row['location'])
+            if continent in continent_counts:
+                continent_counts[continent] += row['count']
+            else:
+                continent_counts[continent] = row['count']
         
+        # Convert back to list format for template
         region_data = [{'location': continent, 'count': count} 
                       for continent, count in sorted(continent_counts.items(), 
                                                    key=lambda x: x[1], reverse=True)]
 
-        # Get device distribution using ALL visits
-        device_counts = {}
-        for v in all_visits_for_charts:
-            d = v["device"] or "Desktop"
-            device_counts[d] = device_counts.get(d, 0) + 1
-        device_data = [{"device": k, "count": v} for k, v in device_counts.items()]
+        # Get city distribution
+        city_data = query_db(
+            """
+            SELECT city, country, COUNT(DISTINCT ip_hash) as count 
+            FROM visits 
+            WHERE link_id = ? AND city IS NOT NULL AND city != 'Unknown'
+            GROUP BY city, country
+            ORDER BY count DESC
+            LIMIT 20
+            """, 
+            [link["id"]]
+        )
 
-        # Process daily distribution
-        local_days = []
-        for v in all_visits_for_charts:
-            try:
-                dt_utc = datetime.fromisoformat(v["ts"])
-                dt_local = dt_utc + (datetime.now() - datetime.utcnow())
-                local_days.append(dt_local.weekday())
-            except: pass
+        # Get device distribution
+        device_data = query_db(
+            """
+            SELECT device, COUNT(DISTINCT ip_hash) as count
+            FROM visits
+            WHERE link_id = ? AND device IS NOT NULL
+            GROUP BY device
+            """,
+            [link["id"]],
+        )
 
-        day_counts = Counter(local_days)
-        day_names = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
-        daily_data = [{"day": name, "count": day_counts.get(i, 0)} for i, name in enumerate(day_names)]
+        # Get daily engagement trends (7-day pattern) using SQL
+        daily_raw = query_db(
+            """
+            SELECT 
+                CASE CAST(strftime('%w', ts) AS INTEGER)
+                    WHEN 0 THEN 'Sun'
+                    WHEN 1 THEN 'Mon'
+                    WHEN 2 THEN 'Tue'
+                    WHEN 3 THEN 'Wed'
+                    WHEN 4 THEN 'Thu'
+                    WHEN 5 THEN 'Fri'
+                    WHEN 6 THEN 'Sat'
+                END as day_name,
+                COUNT(*) as count
+            FROM visits 
+            WHERE link_id = ?
+            GROUP BY strftime('%w', ts)
+            ORDER BY CAST(strftime('%w', ts) AS INTEGER)
+            """,
+            [link["id"]],
+        )
         
-        # ... (rest of the logic remains similar but uses the pre-calculated totals)
-
+        # Ensure all days are present with 0 counts if no data
+        day_names = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+        daily_counts = {row['day_name']: row['count'] for row in daily_raw}
+        
+        daily_data = []
+        for day_name in day_names:
+            count = daily_counts.get(day_name, 0)
+            daily_data.append({"day": day_name, "count": count})
         
         # Calculate weekend vs weekday insight
-        weekday_total = sum(day_counts.get(i, 0) for i in range(5))  # Mon-Fri
-        weekend_total = sum(day_counts.get(i, 0) for i in range(5, 7))  # Sat-Sun
+        weekday_total = sum(daily_counts.get(day, 0) for day in ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'])
+        weekend_total = sum(daily_counts.get(day, 0) for day in ['Sat', 'Sun'])
         
         weekend_insight = ""
-        if weekday_total > 0 or weekend_total > 0:
-            if weekday_total > 0:
-                weekend_ratio = (weekend_total / 2) / (weekday_total / 5) if weekday_total > 0 else 1
-                if weekend_ratio > 1.2:
-                    weekend_insight = f"Weekend traffic is {abs((weekend_ratio-1)*100):.0f}% higher than weekdays, suggesting consumer-focused audience behavior."
-                elif weekend_ratio < 0.8:
-                    weekend_insight = f"Weekday traffic is {abs((1-weekend_ratio)*100):.0f}% higher than weekends, suggesting business-focused audience behavior."
-                else:
-                    weekend_insight = "Traffic is fairly consistent between weekdays and weekends."
+        if weekday_total > 0 and weekend_total > 0:
+            weekend_percentage = ((weekend_total - weekday_total) / weekday_total) * 100
+            if weekend_percentage > 20:
+                weekend_insight = f"Weekend traffic shows {abs(weekend_percentage):.0f}% increase compared to weekdays, suggesting consumer-focused audience behavior."
+            elif weekend_percentage < -20:
+                weekend_insight = f"Weekday traffic shows {abs(weekend_percentage):.0f}% increase compared to weekends, suggesting business-focused audience behavior."
             else:
-                weekend_insight = "Traffic is concentrated on weekends."
+                weekend_insight = "Traffic is fairly consistent between weekdays and weekends."
         else:
             weekend_insight = "Gathering engagement pattern data..."
 
@@ -572,54 +632,33 @@ def create_app() -> Flask:
         hour_counts = Counter(local_hours)
         final_hourly_data = []
         
-        # Ensure all 24 hours are represented for the "working for all time frames" requirement
-        for h in range(24):
-            final_hourly_data.append({"hour": h, "count": hour_counts.get(h, 0)})
+        for h, c in hour_counts.items():
+            final_hourly_data.append({"hour": h, "count": c})
                 
         hourly_data = sorted(final_hourly_data, key=lambda x: x["hour"])
 
-        # Generate frequency insight based on hourly patterns
-        if hourly_data and any(h["count"] > 0 for h in hourly_data):
-            # Find peak hours
-            max_count = max(h["count"] for h in hourly_data)
-            peak_hours = [h["hour"] for h in hourly_data if h["count"] == max_count]
-            
-            # Business hours (9-17) vs after hours analysis
-            business_hours_total = sum(h["count"] for h in hourly_data if 9 <= h["hour"] <= 17)
-            total_clicks = sum(h["count"] for h in hourly_data)
-            business_percentage = (business_hours_total / total_clicks * 100) if total_clicks > 0 else 0
-            
-            if business_percentage > 70:
-                frequency_insight = "Peak activity during business hours suggests professional audience behavior."
-            elif business_percentage < 30:
-                frequency_insight = "High after-hours activity indicates consumer or international audience."
-            elif peak_hours and any(h >= 18 or h <= 8 for h in peak_hours):
-                frequency_insight = "Evening peak activity suggests consumer-focused content engagement."
-            else:
-                frequency_insight = "Balanced activity pattern across different time periods."
-        else:
-            frequency_insight = "Gathering initial click pattern data for analysis."
-
         trust = trust_score(link["id"])
-        # Use full visits for attention decay to show history, or filtered if preferred
-        # Here we use recalculated_visits which is already filtered by time_range
-        attention = attention_decay(list(reversed(recalculated_visits_all)))
+        attention = attention_decay(list(reversed(recalculated_visits)))
 
         # Prepare payload for frontend
+        def safe_get(row, key):
+            return row[key] if row and row[key] is not None else 0
+
         analytics_payload = {
             "intent": {
-                "curious": totals["curious"],
-                "interested": totals["interested"],
-                "engaged": totals["engaged"]
+                "curious": curious_count,
+                "interested": interested_count,
+                "engaged": engaged_count
             },
             "quality": {
-                "human": totals["total"] - totals["suspicious"],
-                "suspicious": totals["suspicious"]
+                "human": total_visits - suspicious_count,
+                "suspicious": suspicious_count
             },
             "attention": attention,
             "hourly": [dict(row) for row in hourly_data],
             "daily": daily_data,
             "region": [dict(row) for row in region_data],
+            "cities": [dict(row) for row in city_data],
             "device": [dict(row) for row in device_data],
             "weekend_insight": weekend_insight
         }
@@ -632,13 +671,61 @@ def create_app() -> Flask:
             trust=trust,
             attention=attention,
             region_data=region_data,
+            city_data=city_data,
             device_data=device_data,
             hourly_data=hourly_data,
             daily_data=daily_data,
             weekend_insight=weekend_insight,
-            frequency_insight=frequency_insight,
             analytics_payload=analytics_payload,
-            behavior_rule=behavior_rule
+            behavior_rule=behavior_rule,
+        )
+
+    @app.route("/debug-analytics/<code>")
+    def debug_analytics(code):
+        """Debug route to check analytics data"""
+        link = query_db("SELECT * FROM links WHERE code = ?", [code], one=True)
+        if not link:
+            return f"Link {code} not found", 404
+        
+        # Get daily data (same logic as analytics route)
+        daily_raw = query_db("SELECT ts FROM visits WHERE link_id = ?", [link["id"]])
+        
+        from collections import Counter
+        local_days = []
+        for row in daily_raw:
+            try:
+                dt_utc = datetime.fromisoformat(row["ts"])
+                dt_local = dt_utc + (datetime.now() - datetime.utcnow())
+                day_of_week = dt_local.weekday()
+                local_days.append(day_of_week)
+            except Exception as e:
+                print(f"Error processing timestamp {row['ts']}: {e}")
+                pass
+
+        day_counts = Counter(local_days)
+        day_names = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+        daily_data = []
+        
+        for i, day_name in enumerate(day_names):
+            count = day_counts.get(i, 0)
+            daily_data.append({"day": day_name, "count": count})
+        
+        # Create simplified analytics payload
+        analytics_payload = {
+            "daily": daily_data,
+            "intent": {"curious": 0, "interested": 0, "engaged": 0},
+            "quality": {"human": 0, "suspicious": 0},
+            "attention": [],
+            "hourly": [],
+            "region": [],
+            "device": []
+        }
+        
+        return render_template(
+            "debug_analytics.html",
+            link=link,
+            daily_data=daily_data,
+            analytics_payload=analytics_payload
         )
 
     @app.route("/links/<code_id>/csv")
@@ -749,6 +836,11 @@ def create_app() -> Flask:
         for r in region_data:
             writer.writerow(['Continent', r['location'], r['count']])
         
+        # Cities
+        for c in city_data:
+            city_country = f"{c['city']}, {c['country']}" if c['country'] else c['city']
+            writer.writerow(['City', city_country, c['count']])
+            
         # Device
         for d in device_data:
             writer.writerow(['Device', d['device'], d['count']])
@@ -2125,7 +2217,7 @@ def detect_region(ip: str) -> str:
     
     try:
         # Try to use MaxMind GeoIP database
-        if os.path.exists(GEOIP_DB_PATH):
+        if GEOIP_AVAILABLE and os.path.exists(GEOIP_DB_PATH):
             with geoip2.database.Reader(GEOIP_DB_PATH) as reader:
                 try:
                     response = reader.city(ip)
@@ -2165,15 +2257,13 @@ def get_detailed_location(ip: str) -> dict:
         'timezone': None
     }
     
-    if not ip or ip == "unknown":
-        ip = "127.0.0.1"
-    
-    # Check for local IPs - let them pass through to detect_region_fallback 
-    # if GeoIP database doesn't have them, instead of returning "Local/Private"
-    is_local = ip.startswith("127.") or ip.startswith("192.168.") or ip.startswith("10.")
+    if not ip or ip == "unknown" or ip.startswith("127.") or ip.startswith("192.168.") or ip.startswith("10."):
+        location_info['country'] = 'Local/Private'
+        location_info['region'] = 'Local/Private'
+        return location_info
     
     try:
-        if os.path.exists(GEOIP_DB_PATH) and not is_local:
+        if os.path.exists(GEOIP_DB_PATH):
             with geoip2.database.Reader(GEOIP_DB_PATH) as reader:
                 try:
                     response = reader.city(ip)
@@ -2204,15 +2294,10 @@ def get_detailed_location(ip: str) -> dict:
     return location_info
 
 
-def country_to_continent(country: str, ip: str = None) -> str:
+def country_to_continent(country: str) -> str:
     """Map country names to continents."""
-    if not country or country == 'Unknown':
-        return 'Unknown'
-        
-    if country == 'Local/Private':
-        if ip:
-            return detect_region_fallback(ip)
-        return 'Asia' # Default for local in this app
+    if not country or country in ['Unknown', 'Local/Private']:
+        return country
     
     # Comprehensive country to continent mapping
     continent_map = {
@@ -2391,73 +2476,64 @@ def country_to_continent(country: str, ip: str = None) -> str:
         'São Tomé and Príncipe': 'Africa',
         'Seychelles': 'Africa',
         
-        # Australia (User requested 'Australia' instead of 'Oceania')
-        'Australia': 'Australia',
-        'New Zealand': 'Australia',
-        'Papua New Guinea': 'Australia',
-        'Fiji': 'Australia',
-        'Solomon Islands': 'Australia',
-        'Vanuatu': 'Australia',
-        'Samoa': 'Australia',
-        'Micronesia': 'Australia',
-        'Tonga': 'Australia',
-        'Kiribati': 'Australia',
-        'Palau': 'Australia',
-        'Marshall Islands': 'Australia',
-        'Tuvalu': 'Australia',
-        'Nauru': 'Australia',
-        
-        # Antarctica
-        'Antarctica': 'Antarctica',
-        'French Southern Territories': 'Antarctica',
-        'Heard Island and McDonald Islands': 'Antarctica',
-        'South Georgia and the South Sandwich Islands': 'Antarctica',
-        'Bouvet Island': 'Antarctica'
+        # Oceania
+        'Australia': 'Oceania',
+        'New Zealand': 'Oceania',
+        'Papua New Guinea': 'Oceania',
+        'Fiji': 'Oceania',
+        'Solomon Islands': 'Oceania',
+        'Vanuatu': 'Oceania',
+        'Samoa': 'Oceania',
+        'Micronesia': 'Oceania',
+        'Tonga': 'Oceania',
+        'Kiribati': 'Oceania',
+        'Palau': 'Oceania',
+        'Marshall Islands': 'Oceania',
+        'Tuvalu': 'Oceania',
+        'Nauru': 'Oceania',
     }
     
-    # Check if the input is already a continent name
-    if country in ['Asia', 'Africa', 'Antarctica', 'South America', 'North America', 'Europe', 'Australia', 'Oceania']:
-        return 'Australia' if country == 'Oceania' else country
-        
     # Return mapped continent or the original country if not found
     return continent_map.get(country, country)
 
 
 def detect_region_fallback(ip: str) -> str:
-    """Fallback region detection using IP ranges (original implementation)."""
+    """Fallback region detection using real IP API."""
     try:
+        # Check for localhost
+        if ip == "127.0.0.1" or ip == "localhost":
+            return "Localhost"
+
         parts = ip.split(".")
         if len(parts) != 4:
             return "Unknown"
             
         first = int(parts[0])
-        last = int(parts[3])
         
-        # Check for Local/Private Networks -> Map to Continents for Demo
-        if first == 127:
-            # Map different 127.x.x.x to different continents for variety in demo
-            if int(parts[1]) == 0: return "Asia"
-            if int(parts[1]) == 1: return "Africa"
-            if int(parts[1]) == 2: return "Antarctica"
-            return "Asia" 
+        # Check for Private Networks
         if first == 10:
-            return "North America" if last % 2 == 0 else "Europe"
+            return "Private Network"
         if first == 192 and int(parts[1]) == 168:
-            return "South America" if last % 2 == 0 else "Australia"
+            return "Private Network" 
         if first == 172 and (16 <= int(parts[1]) <= 31):
-            return "Africa"
+            return "Private Network"
 
-        # Mock regions for other IPs (Simulation logic)
-        if first < 50:
-            return "North America"
-        elif first < 100:
-            return "Europe"
-        elif first < 150:
-            return "Asia"
-        elif first < 200:
-            return "South America"
-        else:
-            return "Australia"
+        # Try to get real data from free API (with timeout to prevent hanging)
+        try:
+            import requests
+            response = requests.get(f"http://ip-api.com/json/{ip}", timeout=2)
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("status") == "success":
+                    # return continent or country
+                    # ip-api free doesn't give continent directly, but gives country/timezone
+                    # We can use timezone to infer roughly or just return Country
+                    return data.get("country", "Unknown")
+        except Exception:
+            pass
+            
+        return "Unknown"
+
     except (ValueError, IndexError):
         return "Unknown"
 
@@ -2467,6 +2543,7 @@ def allowed_file(filename):
     return '.' in filename and \
            filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
-app = create_app()
+
 if __name__ == "__main__":
+    app = create_app()
     app.run(debug=True, port=5000, host="0.0.0.0")

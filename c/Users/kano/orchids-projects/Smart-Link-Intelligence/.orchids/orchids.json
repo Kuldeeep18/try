@@ -1,7 +1,0 @@
-{
-  "projectId": "d265a149-3b06-44f6-a09b-3596f829a88a",
-  "createdAt": 1767171344047,
-  "startupCommands": [
-    "pip install -r requirements.txt; python app.py"
-  ]
-}

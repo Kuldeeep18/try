@@ -23,7 +23,8 @@
                     <div class="row">
                         <div class="col-md-4">
                             <div class="text-center p-3">
-                                <div class="bg-primary text-white rounded-circle p-3 mb-2 mx-auto" style="width: 60px; height: 60px; display: flex; align-items: center; justify-content: center;">
+                                <div class="bg-primary text-white rounded-circle p-3 mb-2 mx-auto"
+                                    style="width: 60px; height: 60px; display: flex; align-items: center; justify-content: center;">
                                     <i class="bi bi-person fs-4"></i>
                                 </div>
                                 <h6 class="fw-bold">😊 Curious</h6>
@@ -32,7 +33,8 @@
                         </div>
                         <div class="col-md-4">
                             <div class="text-center p-3">
-                                <div class="bg-warning text-white rounded-circle p-3 mb-2 mx-auto" style="width: 60px; height: 60px; display: flex; align-items: center; justify-content: center;">
+                                <div class="bg-warning text-white rounded-circle p-3 mb-2 mx-auto"
+                                    style="width: 60px; height: 60px; display: flex; align-items: center; justify-content: center;">
                                     <i class="bi bi-arrow-repeat fs-4"></i>
                                 </div>
                                 <h6 class="fw-bold">🤔 Interested</h6>
@@ -41,7 +43,8 @@
                         </div>
                         <div class="col-md-4">
                             <div class="text-center p-3">
-                                <div class="bg-success text-white rounded-circle p-3 mb-2 mx-auto" style="width: 60px; height: 60px; display: flex; align-items: center; justify-content: center;">
+                                <div class="bg-success text-white rounded-circle p-3 mb-2 mx-auto"
+                                    style="width: 60px; height: 60px; display: flex; align-items: center; justify-content: center;">
                                     <i class="bi bi-fire fs-4"></i>
                                 </div>
                                 <h6 class="fw-bold">🔥 Highly Engaged</h6>
@@ -73,7 +76,7 @@
                             </thead>
                             <tbody>
                                 {% for rule in user_rules %}
-                                <tr {% if rule.is_default %}class="table-success"{% endif %}>
+                                <tr {% if rule.is_default %}class="table-success" {% endif %}>
                                     <td>
                                         <strong>{{ rule.rule_name }}</strong>
                                         {% if rule.is_default %}
@@ -98,13 +101,20 @@
                                     </td>
                                     <td>
                                         {% if not rule.is_default %}
-                                        <form method="POST" action="{{ url_for('set_default_behavior_rule', rule_id=rule.id) }}" class="d-inline">
-                                            <button type="submit" class="btn btn-sm btn-outline-success" title="Set as Default">
+                                        <form method="POST"
+                                            action="{{ url_for('set_default_behavior_rule', rule_id=rule.id) }}"
+                                            class="d-inline">
+                                            <button type="submit" class="btn btn-sm btn-outline-success"
+                                                title="Set as Default">
                                                 <i class="bi bi-check-circle"></i>
                                             </button>
                                         </form>
-                                        <form method="POST" action="{{ url_for('delete_behavior_rule', rule_id=rule.id) }}" class="d-inline" onsubmit="return confirm('Are you sure you want to delete this rule?')">
-                                            <button type="submit" class="btn btn-sm btn-outline-danger" title="Delete Rule">
+                                        <form method="POST"
+                                            action="{{ url_for('delete_behavior_rule', rule_id=rule.id) }}"
+                                            class="d-inline"
+                                            onsubmit="return confirm('Are you sure you want to delete this rule?')">
+                                            <button type="submit" class="btn btn-sm btn-outline-danger"
+                                                title="Delete Rule">
                                                 <i class="bi bi-trash"></i>
                                             </button>
                                         </form>
@@ -150,44 +160,48 @@
                             <label class="form-label fw-semibold">
                                 <i class="bi bi-tag me-1"></i>Rule Name <span class="text-danger">*</span>
                             </label>
-                            <input type="text" name="rule_name" class="form-control" placeholder="e.g., E-commerce Rule, Blog Rule" required>
+                            <input type="text" name="rule_name" class="form-control"
+                                placeholder="e.g., E-commerce Rule, Blog Rule" required>
                             <div class="form-text">Give your rule a descriptive name</div>
                         </div>
-                        
+
                         <div class="col-md-4 mb-3">
                             <label class="form-label fw-semibold">
                                 <i class="bi bi-clock me-1"></i>Returning Window
                             </label>
                             <div class="input-group">
-                                <input type="number" name="returning_window_hours" class="form-control" value="48" min="1" max="168" required>
+                                <input type="number" name="returning_window_hours" class="form-control" value="48"
+                                    min="1" max="168" required>
                                 <span class="input-group-text">hours</span>
                             </div>
                             <div class="form-text">Time window to consider a visitor as "returning"</div>
                         </div>
-                        
+
                         <div class="col-md-4 mb-3">
                             <label class="form-label fw-semibold">
                                 <i class="bi bi-arrow-repeat me-1"></i>Interested Threshold
                             </label>
                             <div class="input-group">
-                                <input type="number" name="interested_threshold" class="form-control" value="2" min="1" max="10" required>
+                                <input type="number" name="interested_threshold" class="form-control" value="2" min="1"
+                                    max="10" required>
                                 <span class="input-group-text">visits</span>
                             </div>
                             <div class="form-text">Visits needed to be "Interested"</div>
                         </div>
-                        
+
                         <div class="col-md-4 mb-3">
                             <label class="form-label fw-semibold">
                                 <i class="bi bi-fire me-1"></i>Engaged Threshold
                             </label>
                             <div class="input-group">
-                                <input type="number" name="engaged_threshold" class="form-control" value="3" min="1" max="20" required>
+                                <input type="number" name="engaged_threshold" class="form-control" value="3" min="1"
+                                    max="20" required>
                                 <span class="input-group-text">clicks</span>
                             </div>
                             <div class="form-text">Clicks needed to be "Highly Engaged"</div>
                         </div>
                     </div>
-                    
+
                     <!-- Preview -->
                     <div class="alert alert-info">
                         <h6 class="alert-heading">
@@ -229,25 +243,5 @@
     </div>
 </div>
 
-<script>
-document.addEventListener('DOMContentLoaded', function() {
-    // Update preview when values change
-    const returningWindow = document.querySelector('input[name="returning_window_hours"]');
-    const interestedThreshold = document.querySelector('input[name="interested_threshold"]');
-    const engagedThreshold = document.querySelector('input[name="engaged_threshold"]');
-    
-    function updatePreview() {
-        const hours = returningWindow.value;
-        const interested = interestedThreshold.value;
-        const engaged = engagedThreshold.value;
-        
-        document.getElementById('interestedPreview').textContent = `${interested}+ visits in ${hours}h`;
-        document.getElementById('engagedPreview').textContent = `${engaged}+ clicks total`;
-    }
-    
-    returningWindow.addEventListener('input', updatePreview);
-    interestedThreshold.addEventListener('input', updatePreview);
-    engagedThreshold.addEventListener('input', updatePreview);
-});
-</script>
+<script src="{{ url_for('static', filename='js/behavior_rules.js') }}"></script>
 {% endblock %}

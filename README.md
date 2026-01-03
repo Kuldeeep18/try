@@ -93,6 +93,7 @@ graph TD
 - **Smart Ad System**: Grid-based ad placement with premium bypass
 - **Custom Branding**: Personalized ad creation with image support
 - **Premium Features**: Ad-free experience and advanced analytics
+- **Link Management**: Delete, track, and manage all links from one dashboard
 - **Export Capabilities**: Excel/CSV export with shareable analytics
 
 ### 🔧 **Developer-Friendly**
@@ -367,7 +368,7 @@ Level 5: 🔴 Link Disabled
 │  │ Original URL: https://example.com/long-url              │ │
 │  │ Custom Alias: my-link                                   │ │
 │  │ Behavior Rule: E-commerce (3+ visits, 5+ clicks)       │ │
-│  │ Redirect Type: ○ Standard  ● Progressive                │ │
+│  │ Redirect Info: [ Standard / Progressive / Password ]   │ │
 │  │                                                         │ │
 │  │ [Create Smart Link]  [Reset Form]                      │ │
 │  └─────────────────────────────────────────────────────────┘ │
@@ -650,6 +651,7 @@ Smart Link Intelligence features enterprise-grade DDoS protection:
 
 ### 🛡️ Security Features
 - **🔐 Secure Authentication**: Multi-factor authentication support
+- **🔑 Password Protection**: Optional per-link password requirement
 - **🚫 Advanced DDoS Protection**: 5-level automatic threat mitigation
 - **⚡ Rate Limiting**: Intelligent request throttling and burst detection
 - **🔒 Data Encryption**: All sensitive data encrypted at rest

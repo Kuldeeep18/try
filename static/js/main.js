@@ -90,6 +90,7 @@ document.addEventListener('DOMContentLoaded', function () {
     if (window.toggleFormFields) {
         window.toggleFormFields();
     }
+    
     // Chart.js default configuration
     Chart.defaults.font.family = "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
     Chart.defaults.color = '#6b7280';
@@ -166,6 +167,31 @@ document.addEventListener('DOMContentLoaded', function () {
     const data = window.analyticsData;
     console.log('Analytics data loaded:', data);
 
+    // Helper function to show insufficient data message
+    function showInsufficientDataMessage(canvasElement) {
+        const container = canvasElement.parentElement;
+        canvasElement.style.display = 'none';
+
+        const messageDiv = document.createElement('div');
+        messageDiv.className = 'alert alert-info d-flex align-items-center justify-content-center';
+        messageDiv.style.height = '280px';
+        messageDiv.innerHTML = `
+            <div class="text-center">
+                <svg width="48" height="48" fill="currentColor" class="text-info mb-3" viewBox="0 0 16 16">
+                    <path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16zm.93-9.412-1 4.705c-.07.34.029.533.304.533.194 0 .487-.07.686-.246l-.088.416c-.287.346-.92.598-1.465.598-.703 0-1.002-.422-.808-1.319l.738-3.468c.064-.293.006-.399-.287-.47l-.451-.081.082-.381 2.29-.287zM8 5.5a1 1 0 1 1 0-2 1 1 0 0 1 0 2z"/>
+                </svg>
+                <p class="mb-0 fw-medium">Not enough data yet</p>
+                <p class="small text-muted mb-0">Waiting for more visitors...</p>
+            </div>
+        `;
+        container.appendChild(messageDiv);
+    }
+
+    // Relaxed check: Simply checking if we have ANY data
+    function hasData(dataArray) {
+        return dataArray && Array.isArray(dataArray) && dataArray.length > 0;
+    }
+
     // 1. Attention Decay Chart
     const attentionCtx = document.getElementById('attentionDecayChart');
     if (attentionCtx) {
@@ -231,7 +257,7 @@ document.addEventListener('DOMContentLoaded', function () {
         }
 
         new Chart(frequencyCtx, {
-            type: 'line', // Changed to Line chart to 'connect' data
+            type: 'line',
             data: {
                 labels: Array.from({ length: 24 }, (_, i) => i + ':00'),
                 datasets: [{
@@ -240,7 +266,7 @@ document.addEventListener('DOMContentLoaded', function () {
                     backgroundColor: 'rgba(99, 102, 241, 0.2)',
                     borderColor: '#6366f1',
                     borderWidth: 3,
-                    tension: 0.4, // Smooth curves
+                    tension: 0.4,
                     fill: true,
                     pointBackgroundColor: '#fff',
                     pointBorderColor: '#6366f1',
@@ -271,7 +297,7 @@ document.addEventListener('DOMContentLoaded', function () {
         const totalIntent = (data.intent.curious || 0) + (data.intent.interested || 0) + (data.intent.engaged || 0);
         const labels = ['Curious', 'Interested', 'Engaged'];
         const chartData = totalIntent === 0 
-            ? [1, 1, 1] // Show equal segments when no data
+            ? [1, 1, 1]
             : [data.intent.curious || 0, data.intent.interested || 0, data.intent.engaged || 0];
 
         new Chart(intentCtx, {
@@ -321,7 +347,7 @@ document.addEventListener('DOMContentLoaded', function () {
         const totalQuality = (data.quality.human || 0) + (data.quality.suspicious || 0);
         const labels = ['Human Traffic', 'Suspicious'];
         const chartData = totalQuality === 0 
-            ? [1, 0] // Show mostly human when no data
+            ? [1, 0]
             : [data.quality.human || 0, data.quality.suspicious || 0];
 
         new Chart(qualityCtx, {
@@ -370,7 +396,7 @@ document.addEventListener('DOMContentLoaded', function () {
         const dailyData = data.daily || [];
         const labels = dailyData.length > 0 
             ? dailyData.map(d => d.day)
-            : ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+            : ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
         const chartData = dailyData.length > 0 
             ? dailyData.map(d => d.count)
             : [0, 0, 0, 0, 0, 0, 0];
@@ -508,9 +534,9 @@ document.addEventListener('DOMContentLoaded', function () {
                 datasets: [{
                     data: chartData,
                     backgroundColor: [
-                        'rgba(59, 130, 246, 0.8)',  // Desktop
-                        'rgba(168, 85, 247, 0.8)',  // Tablet
-                        'rgba(236, 72, 153, 0.8)'   // Mobile
+                        'rgba(59, 130, 246, 0.8)',
+                        'rgba(168, 85, 247, 0.8)',
+                        'rgba(236, 72, 153, 0.8)'
                     ],
                     borderColor: '#ffffff',
                     borderWidth: 2

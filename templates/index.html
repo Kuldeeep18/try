@@ -58,16 +58,16 @@
                   placeholder="https://example.com/your-long-url" required>
                 <div class="form-text">Enter the full URL you want to shorten and track</div>
               </div>
-              
+
               <div class="col-md-6">
                 <label class="form-label fw-semibold">
                   <i class="bi bi-tag me-1"></i>Custom Alias (Optional)
                 </label>
-                <input type="text" name="code" class="form-control form-control-lg" 
-                  placeholder="my-custom-link" maxlength="24">
+                <input type="text" name="code" class="form-control form-control-lg" placeholder="my-custom-link"
+                  maxlength="24">
                 <div class="form-text">Leave blank for auto-generated code</div>
               </div>
-              
+
               <div class="col-md-6">
                 <label class="form-label fw-semibold">
                   <i class="bi bi-gear me-1"></i>Behavior Thresholds
@@ -96,10 +96,30 @@
                 <label class="form-label fw-semibold">
                   <i class="bi bi-diagram-3 me-1"></i>Redirect Configuration
                 </label>
-                <select class="form-select form-select-lg" name="behavior_rule" id="behaviorRule" onchange="showHideFields()">
+                <select class="form-select form-select-lg" name="behavior_rule" id="behaviorRule"
+                  onchange="showHideFields()">
                   <option value="standard" selected>Standard Redirect (Same destination)</option>
                   <option value="progression">Progressive Redirect (Different URLs for different behaviors)</option>
+                  <option value="password_protected">Password Protected (Require password to access)</option>
                 </select>
+              </div>
+            </div>
+
+            <!-- Password Protection Fields -->
+            <div class="row g-3 mb-4" id="passwordFields" style="display: none;">
+              <div class="col-12">
+                <div class="alert alert-warning">
+                  <i class="bi bi-shield-lock me-2"></i>
+                  <strong>Password Protection:</strong> Visitors must enter the correct password to be redirected.
+                </div>
+              </div>
+              <div class="col-md-12">
+                <label class="form-label fw-semibold">
+                  <i class="bi bi-key me-1"></i>Access Password <span class="text-danger">*</span>
+                </label>
+                <input type="password" name="password" class="form-control"
+                  placeholder="Enter a password to lock this link" autocomplete="new-password">
+                <div class="form-text">Make sure to remember this password</div>
               </div>
             </div>
 
@@ -115,7 +135,7 @@
                 <label class="form-label fw-semibold">
                   <i class="bi bi-arrow-repeat me-1"></i>Returning Visitor URL <span class="text-danger">*</span>
                 </label>
-                <input type="url" name="returning_url" class="form-control" 
+                <input type="url" name="returning_url" class="form-control"
                   placeholder="https://example.com/returning-users">
                 <div class="form-text">For users who return within the configured time window</div>
               </div>
@@ -123,8 +143,7 @@
                 <label class="form-label fw-semibold">
                   <i class="bi bi-fire me-1"></i>CTA URL (Highly Engaged) <span class="text-danger">*</span>
                 </label>
-                <input type="url" name="cta_url" class="form-control" 
-                  placeholder="https://example.com/call-to-action">
+                <input type="url" name="cta_url" class="form-control" placeholder="https://example.com/call-to-action">
                 <div class="form-text">For highly engaged users (multiple clicks)</div>
               </div>
             </div>
@@ -175,50 +194,6 @@
 </script>
 {% endif %}
 
-<script>
-// Simple function to show/hide fields based on dropdown selection
-function showHideFields() {
-  const behaviorRule = document.getElementById('behaviorRule').value;
-  const progressiveFields = document.getElementById('progressiveFields');
-  
-  // Hide all fields first
-  progressiveFields.style.display = 'none';
-  
-  // Show relevant fields
-  if (behaviorRule === 'progression') {
-    progressiveFields.style.display = 'block';
-  }
-}
-
-function resetForm() {
-  document.getElementById('linkCreateForm').reset();
-  showHideFields(); // Reset the form fields visibility
-}
-
-// Add form validation
-document.addEventListener('DOMContentLoaded', function() {
-  // Initialize form fields visibility on page load
-  showHideFields();
-  
-  const form = document.getElementById('linkCreateForm');
-  
-  if (form) {
-    form.addEventListener('submit', function(e) {
-      const behaviorRule = document.getElementById('behaviorRule').value;
-      
-      if (behaviorRule === 'progression') {
-        const returningUrl = document.querySelector('input[name="returning_url"]');
-        const ctaUrl = document.querySelector('input[name="cta_url"]');
-        
-        if (!returningUrl.value.trim() || !ctaUrl.value.trim()) {
-          e.preventDefault();
-          alert('Please fill in both Returning URL and CTA URL for progressive redirect.');
-          return false;
-        }
-      }
-    });
-  }
-});
-</script>
+<script src="{{ url_for('static', filename='js/link_management.js') }}"></script>
 
 {% endblock %}
