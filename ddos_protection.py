@@ -21,7 +21,7 @@ class DDoSProtection:
         self.request_cache = defaultdict(list)
         self.blocked_ips = {}
         
-    def check_rate_limit(self, ip_hash, link_id=None):
+    def check_rate_limit(self, ip_address, link_id=None):
         """Check if request should be rate limited"""
         now = datetime.utcnow()
         
@@ -29,14 +29,14 @@ class DDoSProtection:
         self._cleanup_cache(now)
         
         # Check IP-based rate limits
-        ip_requests = self.request_cache[f"ip_{ip_hash}"]
+        ip_requests = self.request_cache[f"ip_{ip_address}"]
         
         # Count requests in last minute
         minute_ago = now - timedelta(minutes=1)
         recent_requests = [req for req in ip_requests if req > minute_ago]
         
         if len(recent_requests) > self.rate_limits['requests_per_ip_per_minute']:
-            self._log_ddos_event(link_id, 'rate_limit', 2, ip_hash)
+            self._log_ddos_event(link_id, 'rate_limit', 2, ip_address)
             return False, 'rate_limited'
         
         # Check for burst attacks (100+ requests in 10 seconds)
@@ -44,11 +44,11 @@ class DDoSProtection:
         burst_requests = [req for req in ip_requests if req > burst_window]
         
         if len(burst_requests) > self.rate_limits['burst_threshold']:
-            self._log_ddos_event(link_id, 'burst_attack', 4, ip_hash)
+            self._log_ddos_event(link_id, 'burst_attack', 4, ip_address)
             return False, 'burst_attack'
         
         # Add current request to cache
-        self.request_cache[f"ip_{ip_hash}"].append(now)
+        self.request_cache[f"ip_{ip_address}"].append(now)
         
         return True, 'allowed'
     
@@ -177,14 +177,14 @@ class DDoSProtection:
             if not self.request_cache[key]:
                 del self.request_cache[key]
     
-    def _log_ddos_event(self, link_id, event_type, severity, ip_hash=None):
+    def _log_ddos_event(self, link_id, event_type, severity, ip_address=None):
         """Log DDoS event to database"""
         conn = sqlite3.connect(self.db_path)
         conn.execute("""
             INSERT INTO ddos_events 
-            (link_id, event_type, severity, ip_hash, detected_at, protection_level)
+            (link_id, event_type, severity, ip_address, detected_at, protection_level)
             VALUES (?, ?, ?, ?, ?, ?)
-        """, [link_id, event_type, severity, ip_hash, 
+        """, [link_id, event_type, severity, ip_address, 
               datetime.utcnow().isoformat(), severity])
         conn.commit()
         conn.close()

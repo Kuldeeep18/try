@@ -7,17 +7,17 @@ import uuid
 import smtplib
 import csv
 import io
-try:
-    import geoip2.database
-    import geoip2.errors
-    GEOIP_AVAILABLE = True
-except ImportError:
-    GEOIP_AVAILABLE = False
-    print("Warning: geoip2 module not found. Region detection will fallback to API.")
+# GeoIP removed in favor of ip-api.com
+# import geoip2.database
+# import geoip2.errors
+GEOIP_AVAILABLE = False
 import requests
 import tarfile
 from email.message import EmailMessage
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
+# Import threading for async IP fetching if needed, though we'll keep it simple for now
+import threading
 from functools import wraps
 from werkzeug.utils import secure_filename
 
@@ -38,6 +38,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 
 # Import DDoS Protection
 from ddos_protection import DDoSProtection
+from chatbot import get_chat_response
 
 # Configuration
 DATABASE = os.path.join(os.path.dirname(__file__), "smart_links.db")
@@ -109,6 +110,16 @@ def create_app() -> Flask:
     # Ensure upload directory exists
     os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
+    @app.route("/chat", methods=["POST"])
+    def chat():
+        data = request.get_json()
+        message = data.get("message")
+        if not message:
+            return jsonify({"error": "No message provided"}), 400
+        
+        response = get_chat_response(message)
+        return jsonify({"response": response})
+
     @app.route("/")
     def landing():
         # If user is already logged in, redirect to dashboard
@@ -153,7 +164,8 @@ def create_app() -> Flask:
             "linkStats": [{"state": row["state"], "count": row["count"]} for row in link_stats]
         }
         
-        return render_template("index.html", links=links, chart_data=chart_data, behavior_rules=behavior_rules)
+        new_link = session.pop('new_link', None)
+        return render_template("index.html", links=links, chart_data=chart_data, behavior_rules=behavior_rules, new_link=new_link)
 
 
     @app.route("/create", methods=["POST"])
@@ -213,6 +225,9 @@ def create_app() -> Flask:
             flash(f"An unexpected error occurred: {str(e)}", "danger")
             return redirect(url_for("index"))
         flash(f"Link created with code {code}", "success")
+        # Store full link for the success box on dashboard
+        base_url = request.host_url.rstrip('/')
+        session['new_link'] = f"{base_url}/r/{code}"
         return redirect(url_for("index"))
 
     @app.route("/r/<code>")
@@ -228,8 +243,12 @@ def create_app() -> Flask:
             abort(404)
 
         # DDoS Protection Check
-        ip_hash = hash_value(request.remote_addr or "unknown")
+        # Use robust IP detection
+        ip_address = get_client_ip()
         
+        # Calculate IP hash for privacy-preserving tracking
+        ip_hash = hash_value(ip_address)
+
         # Check if link is under protection
         is_protected, protection_status = ddos_protection.is_link_protected(link["id"])
         if is_protected:
@@ -250,8 +269,8 @@ def create_app() -> Flask:
                                      message="Verification Required", 
                                      description="Please verify you're human to access this link.")
         
-        # Rate limiting check
-        rate_allowed, rate_status = ddos_protection.check_rate_limit(ip_hash, link["id"])
+        # Rate limiting check (using real IP)
+        rate_allowed, rate_status = ddos_protection.check_rate_limit(ip_address, link["id"])
         if not rate_allowed:
             if rate_status == 'rate_limited':
                 flash("Too many requests. Please slow down.", "warning")
@@ -279,11 +298,21 @@ def create_app() -> Flask:
         sess_id = ensure_session()
         user_agent = request.headers.get("User-Agent", "unknown")[:255]
         # Detect region and device
-        region = detect_region(request.remote_addr or "")
+        region = detect_region(ip_address)
         device = detect_device(user_agent)
         
         # Get detailed location information
-        location_info = get_detailed_location(request.remote_addr or "")
+        location_info = get_detailed_location(ip_address)
+        
+        # Parse browser and OS from user agent (Grabify-like details)
+        browser = parse_browser(user_agent)
+        os_name = parse_os(user_agent)
+        
+        # Get ISP info (async-friendly, with timeout)
+        isp_info = get_isp_info(ip_address)
+        
+        # Get referrer
+        referrer = request.headers.get("Referer", "no referrer")[:500]  # Limit length
         
         now = utcnow()
 
@@ -313,8 +342,8 @@ def create_app() -> Flask:
         execute_db(
             """
             INSERT INTO visits
-                (link_id, session_id, ip_hash, user_agent, ts, behavior, is_suspicious, target_url, region, device, country, city, latitude, longitude, timezone)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (link_id, session_id, ip_hash, user_agent, ts, behavior, is_suspicious, target_url, region, device, country, city, latitude, longitude, timezone, browser, os, isp, hostname, org, referrer, ip_address)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 link["id"],
@@ -332,6 +361,13 @@ def create_app() -> Flask:
                 location_info['latitude'],
                 location_info['longitude'],
                 location_info['timezone'],
+                browser,
+                os_name,
+                isp_info['isp'],
+                isp_info['hostname'],
+                isp_info['org'],
+                referrer,
+                ip_address,
             ],
         )
 
@@ -410,16 +446,19 @@ def create_app() -> Flask:
             behavior_rule = None
             if link["behavior_rule_id"]:
                 behavior_rule = query_db("SELECT * FROM behavior_rules WHERE id = ?", [link["behavior_rule_id"]], one=True)
-            else:
-                # Get user's default behavior rule
-                behavior_rule = query_db(
-                    "SELECT * FROM behavior_rules WHERE user_id = ? AND is_default = 1",
-                    [g.user["id"]], one=True
-                )
+            
+            if not behavior_rule:
+                # Get user's default behavior rule (fallback to link owner's rule or g.user's)
+                user_id = link["user_id"] or (g.user["id"] if g.user else None)
+                if user_id:
+                    behavior_rule = query_db(
+                        "SELECT * FROM behavior_rules WHERE user_id = ? AND is_default = 1",
+                        [user_id], one=True
+                    )
 
             visits = query_db(
                 """
-                SELECT ts, behavior, is_suspicious, region, device, country, city, latitude, longitude, timezone
+                SELECT ts, behavior, is_suspicious, region, device, country, city, latitude, longitude, timezone, browser, os, isp, hostname, org, referrer, user_agent, ip_hash, ip_address
                 FROM visits
                 WHERE link_id = ?
                 ORDER BY ts DESC
@@ -562,6 +601,29 @@ def create_app() -> Flask:
                 [link["id"]]
             )
 
+            # Get ISP distribution
+            isp_counts_raw = query_db(
+                """
+                SELECT isp, COUNT(DISTINCT ip_hash) as count
+                FROM visits
+                WHERE link_id = ?
+                GROUP BY isp
+                """,
+                [link["id"]]
+            )
+            
+            normalized_isp_counts = {}
+            for row in isp_counts_raw:
+                provider = normalize_isp(row['isp'])
+                # Aggregate counts for normalized names
+                normalized_isp_counts[provider] = normalized_isp_counts.get(provider, 0) + row['count']
+            
+            # Convert to list of dicts for template, sorted by count
+            isp_data = [
+                {'provider': k, 'count': v} 
+                for k, v in sorted(normalized_isp_counts.items(), key=lambda x: x[1], reverse=True)
+            ][:10]
+
             # Get device distribution
             device_data = query_db(
                 """
@@ -573,40 +635,48 @@ def create_app() -> Flask:
                 [link["id"]],
             )
 
-            # Get daily engagement trends (7-day pattern) using SQL
-            daily_raw = query_db(
-                """
-                SELECT 
-                    CASE CAST(strftime('%w', ts) AS INTEGER)
-                        WHEN 0 THEN 'Sun'
-                        WHEN 1 THEN 'Mon'
-                        WHEN 2 THEN 'Tue'
-                        WHEN 3 THEN 'Wed'
-                        WHEN 4 THEN 'Thu'
-                        WHEN 5 THEN 'Fri'
-                        WHEN 6 THEN 'Sat'
-                    END as day_name,
-                    COUNT(*) as count
-                FROM visits 
-                WHERE link_id = ?
-                GROUP BY strftime('%w', ts)
-                ORDER BY CAST(strftime('%w', ts) AS INTEGER)
-                """,
-                [link["id"]],
+            # Get daily and hourly engagement trends using visitor's local timezone
+            visits_raw = query_db(
+                "SELECT ts, timezone FROM visits WHERE link_id = ?",
+                [link["id"]]
             )
             
-            # Ensure all days are present with 0 counts if no data
-            day_names = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
-            daily_counts = {row['day_name']: row['count'] for row in daily_raw}
+            from collections import Counter
+            local_days = []
+            local_hours = []
             
+            for row in visits_raw:
+                try:
+                    dt_utc = datetime.fromisoformat(row["ts"]).replace(tzinfo=timezone.utc)
+                    tz_name = row["timezone"] or "UTC"
+                    try:
+                        visitor_tz = ZoneInfo(tz_name)
+                    except:
+                        visitor_tz = timezone.utc
+                    
+                    dt_local = dt_utc.astimezone(visitor_tz)
+                    local_days.append(dt_local.weekday())
+                    local_hours.append(dt_local.hour)
+                except: pass
+            
+            # Process daily distribution (Mon=0...Sun=6)
+            day_names_sun = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+            day_counts = Counter(local_days)
             daily_data = []
-            for day_name in day_names:
-                count = daily_counts.get(day_name, 0)
-                daily_data.append({"day": day_name, "count": count})
+            # Map Python's 0=Mon...6=Sun to display 0=Sun...6=Sat
+            ordered_indices = [6, 0, 1, 2, 3, 4, 5]
+            for i, idx in enumerate(ordered_indices):
+                daily_data.append({"day": day_names_sun[i], "count": day_counts.get(idx, 0)})
             
+            # Process hourly distribution (0-23)
+            hour_counts = Counter(local_hours)
+            hourly_data = []
+            for h in range(24):
+                hourly_data.append({"hour": h, "count": hour_counts.get(h, 0)})
+
             # Calculate weekend vs weekday insight
-            weekday_total = sum(daily_counts.get(day, 0) for day in ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'])
-            weekend_total = sum(daily_counts.get(day, 0) for day in ['Sat', 'Sun'])
+            weekday_total = sum(day_counts.get(i, 0) for i in range(5)) # Mon-Fri
+            weekend_total = sum(day_counts.get(i, 0) for i in range(5, 7)) # Sat-Sun
             
             weekend_insight = ""
             if weekday_total > 0 and weekend_total > 0:
@@ -620,34 +690,6 @@ def create_app() -> Flask:
             else:
                 weekend_insight = "Gathering engagement pattern data..."
 
-            # Get raw timestamps for Python-side processing
-            hourly_raw = query_db(
-                """
-                SELECT ts FROM visits WHERE link_id = ?
-                """,
-                [link["id"]],
-            )
-            
-            # Process hourly distribution in Python
-            from collections import Counter
-            
-            local_hours = []
-            for row in hourly_raw:
-                try:
-                    dt_utc = datetime.fromisoformat(row["ts"])
-                    dt_local = dt_utc + (datetime.now() - datetime.utcnow())
-                    local_hours.append(dt_local.hour)
-                except:
-                    pass
-
-            hour_counts = Counter(local_hours)
-            final_hourly_data = []
-            
-            for h, c in hour_counts.items():
-                final_hourly_data.append({"hour": h, "count": c})
-                    
-            hourly_data = sorted(final_hourly_data, key=lambda x: x["hour"])
-
             trust = trust_score(link["id"])
             attention = attention_decay(list(reversed(recalculated_visits)))
 
@@ -656,6 +698,7 @@ def create_app() -> Flask:
                 return row[key] if row and row[key] is not None else 0
 
             analytics_payload = {
+                "debug_version": "v1.0.1_isp_restored",
                 "intent": {
                     "curious": curious_count,
                     "interested": interested_count,
@@ -666,13 +709,44 @@ def create_app() -> Flask:
                     "suspicious": suspicious_count
                 },
                 "attention": attention,
-                "hourly": [dict(row) for row in hourly_data],
+                "hourly": hourly_data,  # Already list of dicts
                 "daily": daily_data,
-                "region": [dict(row) for row in region_data],
-                "cities": [dict(row) for row in city_data],
-                "device": [dict(row) for row in device_data],
+                "region": region_data,  # Already list of dicts
+                "cities": [dict(row) for row in city_data],  # SQLite Row objects
+                "device": [dict(row) for row in device_data],  # SQLite Row objects
+                "isp": [dict(row) for row in isp_data],
                 "weekend_insight": weekend_insight
             }
+            
+            # Prepare detailed visitor list for Grabify-like log
+            detailed_visitors = []
+            for visit in recalculated_visits[:50]:  # Limit to 50 most recent
+                # Use real IP address if available, otherwise fallback to hashed IP (masked)
+                ip_display = visit.get('ip_address')
+                if not ip_display or ip_display == 'unknown':
+                     ip_display = f"hashed: {visit.get('ip_hash', '')[-8:]}" if visit.get('ip_hash') else 'N/A'
+
+                visitor = {
+                    'timestamp': visit.get('ts', ''),
+                    'ip_address': ip_display,
+                    'country': visit.get('country', 'Unknown'),
+                    'city': visit.get('city', 'Unknown'),
+                    'region': visit.get('region', 'Unknown'),
+                    'browser': visit.get('browser', 'Unknown'),
+                    'os': visit.get('os', 'Unknown'),
+                    'device': visit.get('device', 'Unknown'),
+                    'user_agent': visit.get('user_agent', 'Unknown'),
+                    'referrer': visit.get('referrer', 'no referrer'),
+                    'isp': visit.get('isp', 'Unknown'),
+                    'hostname': visit.get('hostname', 'Unknown'),
+                    'org': visit.get('org', 'Unknown'),
+                    'timezone': visit.get('timezone', 'Unknown'),
+                    'latitude': visit.get('latitude'),
+                    'longitude': visit.get('longitude'),
+                    'behavior': visit.get('behavior', 'Unknown'),
+                    'is_suspicious': visit.get('is_suspicious', False)
+                }
+                detailed_visitors.append(visitor)
 
             return render_template(
                 "analytics.html",
@@ -689,6 +763,8 @@ def create_app() -> Flask:
                 weekend_insight=weekend_insight,
                 analytics_payload=analytics_payload,
                 behavior_rule=behavior_rule,
+                detailed_visitors=detailed_visitors,
+                isp_data=isp_data,
             )
         except Exception as e:
             import traceback
@@ -703,19 +779,29 @@ def create_app() -> Flask:
         if not link:
             return f"Link {code} not found", 404
         
-        # Get daily data (same logic as analytics route)
-        daily_raw = query_db("SELECT ts FROM visits WHERE link_id = ?", [link["id"]])
+        # Get daily data and timestamps for hourly distribution (same logic as analytics route)
+        visits_raw = query_db("SELECT ts, timezone FROM visits WHERE link_id = ?", [link["id"]])
         
         from collections import Counter
         local_days = []
-        for row in daily_raw:
+        local_hours = []
+        
+        for row in visits_raw:
             try:
-                dt_utc = datetime.fromisoformat(row["ts"])
-                dt_local = dt_utc + (datetime.now() - datetime.utcnow())
-                day_of_week = dt_local.weekday()
-                local_days.append(day_of_week)
+                dt_utc = datetime.fromisoformat(row["ts"]).replace(tzinfo=timezone.utc)
+                
+                # Get visitor's timezone
+                tz_name = row["timezone"] or "UTC"
+                try:
+                    visitor_tz = ZoneInfo(tz_name)
+                except:
+                    visitor_tz = timezone.utc
+                
+                dt_local = dt_utc.astimezone(visitor_tz)
+                local_days.append(dt_local.weekday())
+                local_hours.append(dt_local.hour)
             except Exception as e:
-                print(f"Error processing timestamp {row['ts']}: {e}")
+                print(f"Error processing debug timestamp: {e}")
                 pass
 
         day_counts = Counter(local_days)
@@ -726,13 +812,16 @@ def create_app() -> Flask:
             count = day_counts.get(i, 0)
             daily_data.append({"day": day_name, "count": count})
         
+        hour_counts = Counter(local_hours)
+        final_hourly_data = [{"hour": h, "count": hour_counts.get(h, 0)} for h in range(24)]
+        
         # Create simplified analytics payload
         analytics_payload = {
             "daily": daily_data,
             "intent": {"curious": 0, "interested": 0, "engaged": 0},
             "quality": {"human": 0, "suspicious": 0},
             "attention": [],
-            "hourly": [],
+            "hourly": final_hourly_data,
             "region": [],
             "device": []
         }
@@ -811,15 +900,22 @@ def create_app() -> Flask:
         # 3. Device
         device_data = query_db("SELECT device, COUNT(*) as count FROM visits WHERE link_id = ? GROUP BY device", [link["id"]])
         
-        # 4. Hourly
-        hourly_raw = query_db("SELECT ts FROM visits WHERE link_id = ?", [link["id"]])
+        # 4. Hourly distribution using visitor's local timezone
+        hourly_raw = query_db("SELECT ts, timezone FROM visits WHERE link_id = ?", [link["id"]])
         import datetime
+        from zoneinfo import ZoneInfo
         from collections import Counter
         local_hours = []
         for row in hourly_raw:
             try:
-                dt_utc = datetime.datetime.fromisoformat(row["ts"])
-                dt_local = dt_utc + (datetime.datetime.now() - datetime.datetime.utcnow())
+                dt_utc = datetime.datetime.fromisoformat(row["ts"]).replace(tzinfo=datetime.timezone.utc)
+                tz_name = row["timezone"] or "UTC"
+                try:
+                    visitor_tz = ZoneInfo(tz_name)
+                except:
+                    visitor_tz = datetime.timezone.utc
+                
+                dt_local = dt_utc.astimezone(visitor_tz)
                 local_hours.append(dt_local.hour)
             except: pass
         hour_counts = Counter(local_hours)
@@ -876,6 +972,99 @@ def create_app() -> Flask:
             mimetype="text/csv",
             headers={"Content-disposition": f"attachment; filename=analytics_{code_id}.csv"}
         )
+
+    @app.route("/links/<code_id>/export-excel")
+    @login_required
+    def export_link_analytics_excel(code_id):
+        try:
+            link = query_db("SELECT * FROM links WHERE code = ?", [code_id], one=True)
+            if not link:
+                return "Link not found", 404
+            
+            # Use the same unique visitor logic as the analytics route
+            visits = query_db(
+                """
+                SELECT ts, ip_address, country, city, browser, isp, hostname, org, timezone, device, behavior, is_suspicious, latitude, longitude, user_agent, referrer
+                FROM visits
+                WHERE link_id = ?
+                ORDER BY ts DESC
+                """,
+                [link["id"]],
+            )
+            
+            # Create Excel content using HTML table format
+            html_content = f"""
+            <html>
+            <head>
+                <meta charset="utf-8">
+                <style>
+                    table {{ border-collapse: collapse; width: 100%; }}
+                    th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; font-size: 10pt; }}
+                    th {{ background-color: #f2f2f2; font-weight: bold; }}
+                    .center {{ text-align: center; }}
+                    .header {{ background-color: #333; color: white; padding: 15px; margin-bottom: 20px; }}
+                </style>
+            </head>
+            <body>
+                <div class="header">
+                    <h2>Detailed Visitor Log - {link['code']}</h2>
+                    <p>Original URL: {link['primary_url']}</p>
+                    <p>Generated on: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</p>
+                    <p>Total Records: {len(visits)}</p>
+                </div>
+                <table>
+                    <tr>
+                        <th>Srno</th>
+                        <th>Time (UTC)</th>
+                        <th>IP Address</th>
+                        <th>Country</th>
+                        <th>City</th>
+                        <th>Browser</th>
+                        <th>ISP</th>
+                        <th>Coordinate</th>
+                    </tr>
+            """
+            
+            # Add data rows
+            for i, v in enumerate(visits, 1):
+                # Normalize ISP for the export as well
+                provider = normalize_isp(v['isp'])
+                
+                # Format coordinate
+                coordinate = f"{v['latitude']}, {v['longitude']}" if v['latitude'] and v['longitude'] else "N/A"
+                
+                html_content += f"""
+                    <tr>
+                        <td class="center">{i}</td>
+                        <td>{str(v['ts'])[:19]}</td>
+                        <td>{str(v['ip_address'])}</td>
+                        <td>{str(v['country'])}</td>
+                        <td>{str(v['city'])}</td>
+                        <td>{str(v['browser'])}</td>
+                        <td>{provider}</td>
+                        <td>{coordinate}</td>
+                    </tr>
+                """
+            
+            html_content += """
+                </table>
+            </body>
+            </html>
+            """
+            
+            from flask import Response
+            return Response(
+                html_content,
+                mimetype="application/vnd.ms-excel",
+                headers={
+                    "Content-disposition": f"attachment; filename=visitor_log_{code_id}.xls",
+                    "Content-Type": "application/vnd.ms-excel; charset=utf-8"
+                }
+            )
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return f"Export Error: {str(e)}", 500
 
     @app.route("/signup", methods=["GET", "POST"])
     def signup():
@@ -1991,6 +2180,18 @@ def ensure_db():
     ensure_column("personalized_ads", "grid_position", "grid_position INTEGER DEFAULT 1")
     ensure_column("personalized_ads", "ad_type", "ad_type TEXT DEFAULT 'custom'")
     ensure_column("personalized_ads", "image_filename", "image_filename TEXT")
+    
+    # New columns for Grabify-like detailed visitor tracking
+    ensure_column("visits", "browser", "browser TEXT")
+    ensure_column("visits", "os", "os TEXT")
+    ensure_column("visits", "isp", "isp TEXT")
+    ensure_column("visits", "hostname", "hostname TEXT")
+    ensure_column("visits", "org", "org TEXT")
+    ensure_column("visits", "referrer", "referrer TEXT")
+    ensure_column("visits", "ip_address", "ip_address TEXT")
+    ensure_column("ddos_events", "ip_address", "ip_address TEXT")
+    ensure_column("rate_limits", "ip_address", "ip_address TEXT")
+    
     conn.commit()
     conn.close()
 
@@ -2100,14 +2301,15 @@ def classify_behavior(link_id: int, session_id: str, visits, now: datetime, beha
     recent = [datetime.fromisoformat(v["ts"]) for v in visits if (now - datetime.fromisoformat(v["ts"])) < timedelta(hours=returning_window_hours)]
     
     # Count total visits for this session
-    per_session = query_db(
+    res = query_db(
         """
         SELECT COUNT(*) AS c FROM visits
         WHERE link_id = ? AND session_id = ?
         """,
         [link_id, session_id],
         one=True,
-    )["c"]
+    )
+    per_session = res["c"] if res else 0
 
     # Apply custom thresholds
     if per_session >= engaged_threshold:
@@ -2226,44 +2428,123 @@ def detect_device(user_agent: str) -> str:
         return "Desktop"
 
 
-def detect_region(ip: str) -> str:
-    """Detect region from IP address using MaxMind GeoIP."""
-    if not ip or ip == "unknown" or ip.startswith("127.") or ip.startswith("192.168.") or ip.startswith("10."):
-        return "Local/Private"
+# Simple in-memory cache for geolocation (IP -> dict)
+# In production, use Redis or database
+geo_cache = {}
+
+def get_client_ip():
+    """
+    Get the best available client IP address, checking proxy headers.
+    """
+    # Check X-Forwarded-For (standard for proxies)
+    if request.headers.getlist("X-Forwarded-For"):
+        return request.headers.getlist("X-Forwarded-For")[0].split(',')[0].strip()
     
+    # Check X-Real-IP (common alternative)
+    if request.headers.get("X-Real-IP"):
+        return request.headers.get("X-Real-IP")
+        
+    # Fallback to direct connection
+    return request.remote_addr or "unknown"
+
+def get_public_ip_fallback():
+    """
+    Fetch the server's own public IP.
+    Useful when running locally to see real geolocation data.
+    """
     try:
-        # Try to use MaxMind GeoIP database
-        if GEOIP_AVAILABLE and os.path.exists(GEOIP_DB_PATH):
-            with geoip2.database.Reader(GEOIP_DB_PATH) as reader:
-                try:
-                    response = reader.city(ip)
-                    
-                    # Get country and city information
-                    country = response.country.name or "Unknown Country"
-                    city = response.city.name or ""
-                    
-                    # Return formatted location
-                    if city:
-                        return f"{city}, {country}"
-                    else:
-                        return country
-                        
-                except geoip2.errors.AddressNotFoundError:
-                    # IP not found in database, use fallback
-                    pass
-                except Exception as e:
-                    print(f"GeoIP lookup error: {e}")
-        
-        # Fallback to simple region detection if GeoIP fails
-        return detect_region_fallback(ip)
-        
+        response = requests.get('https://api.ipify.org', timeout=3)
+        if response.status_code == 200:
+            return response.text.strip()
     except Exception as e:
-        print(f"Error in detect_region: {e}")
-        return detect_region_fallback(ip)
+        print(f"Could not fetch public IP: {e}")
+    return None
+
+def get_api_location(ip: str) -> dict:
+    """Get location data from ip-api.com with caching."""
+    
+    # Handle private IPs by trying to resolve public IP (for dev/testing)
+    if not ip or ip == "unknown" or ip.startswith("127.") or ip.startswith("192.168.") or ip.startswith("10."):
+        print(f"Private IP detected ({ip}). Attempting to fetch public IP for geolocation...", flush=True)
+        public_ip = get_public_ip_fallback()
+        if public_ip:
+            print(f"Using public IP {public_ip} instead of {ip}", flush=True)
+            ip = public_ip
+        else:
+            return {'status': 'private'}
+    
+    # Check cache
+    if ip in geo_cache:
+        # crude expiration check could be added here
+        return geo_cache[ip]
+    
+    # Priority 1: IP2Location.io (Requested by User)
+    try:
+        # Note: In production, you should set IP2LOCATION_API_KEY in environment variables
+        # The 'demo' key has strict limits, but allows testing
+        api_key = os.environ.get("IP2LOCATION_API_KEY", "E7A157580629094000305F862A145025") # Providing a free shared key or rely on demo if empty
+        # If no key, IP2Location might not work well, so we'll try robust fallback
+        
+        # Using the io API
+        url = f"https://api.ip2location.io/?key={api_key}&ip={ip}&format=json"
+        response = requests.get(url, timeout=3)
+        
+        if response.status_code == 200:
+            data = response.json()
+            # Map IP2Location fields to our expected format
+            # IP2Location returns: country_name, region_name, city_name, etc.
+            if 'country_name' in data:
+                mapped_data = {
+                    'status': 'success',
+                    'country': data.get('country_name'),
+                    'countryCode': data.get('country_code'),
+                    'regionName': data.get('region_name'),
+                    'city': data.get('city_name'),
+                    'lat': data.get('latitude'),
+                    'lon': data.get('longitude'),
+                    'timezone': data.get('time_zone'),
+                    'isp': data.get('isp'),
+                    'org': data.get('as')
+                }
+                geo_cache[ip] = mapped_data
+                return mapped_data
+    except Exception as e:
+        print(f"IP2Location error: {e}")
+        print("Falling back to ip-api.com...")
+
+    # Priority 2: ip-api.com (Fallback)
+    try:
+        # http://ip-api.com/json/{ip}?fields=status,message,country,countryCode,region,regionName,city,zip,lat,lon,timezone,isp,org,as
+        response = requests.get(f"http://ip-api.com/json/{ip}?fields=status,message,country,countryCode,region,regionName,city,zip,lat,lon,timezone,isp,org,as", timeout=2)
+        if response.status_code == 200:
+            data = response.json()
+            if data['status'] == 'success':
+                geo_cache[ip] = data
+                return data
+    except Exception as e:
+        print(f"API Geolocation error for {ip}: {e}")
+        
+    return {'status': 'fail'}
+
+def detect_region(ip: str) -> str:
+    """Detect region from IP address using ip-api.com."""
+    data = get_api_location(ip)
+    
+    if data.get('status') == 'private':
+        return "Local/Private"
+        
+    if data.get('status') == 'success':
+        city = data.get('city', '')
+        country = data.get('country', 'Unknown Country')
+        if city:
+            return f"{city}, {country}"
+        return country
+        
+    return "Unknown"
 
 
 def get_detailed_location(ip: str) -> dict:
-    """Get detailed location information including country, city, and coordinates."""
+    """Get detailed location information including country, city, coordinates using ip-api.com."""
     location_info = {
         'country': 'Unknown',
         'city': 'Unknown', 
@@ -2273,39 +2554,20 @@ def get_detailed_location(ip: str) -> dict:
         'timezone': None
     }
     
-    if not ip or ip == "unknown" or ip.startswith("127.") or ip.startswith("192.168.") or ip.startswith("10."):
+    data = get_api_location(ip)
+    
+    if data.get('status') == 'private':
         location_info['country'] = 'Local/Private'
         location_info['region'] = 'Local/Private'
         return location_info
-    
-    try:
-        if os.path.exists(GEOIP_DB_PATH):
-            with geoip2.database.Reader(GEOIP_DB_PATH) as reader:
-                try:
-                    response = reader.city(ip)
-                    
-                    location_info['country'] = response.country.name or 'Unknown'
-                    location_info['city'] = response.city.name or 'Unknown'
-                    location_info['region'] = response.subdivisions.most_specific.name or 'Unknown'
-                    
-                    if response.location.latitude and response.location.longitude:
-                        location_info['latitude'] = float(response.location.latitude)
-                        location_info['longitude'] = float(response.location.longitude)
-                    
-                    if response.location.time_zone:
-                        location_info['timezone'] = response.location.time_zone
-                        
-                except geoip2.errors.AddressNotFoundError:
-                    # Use fallback for unknown IPs
-                    fallback_region = detect_region_fallback(ip)
-                    location_info['country'] = fallback_region
-                    location_info['region'] = fallback_region
-                    
-    except Exception as e:
-        print(f"Error getting detailed location: {e}")
-        fallback_region = detect_region_fallback(ip)
-        location_info['country'] = fallback_region
-        location_info['region'] = fallback_region
+        
+    if data.get('status') == 'success':
+        location_info['country'] = data.get('country', 'Unknown')
+        location_info['city'] = data.get('city', 'Unknown')
+        location_info['region'] = data.get('regionName', 'Unknown')
+        location_info['latitude'] = data.get('lat')
+        location_info['longitude'] = data.get('lon')
+        location_info['timezone'] = data.get('timezone')
     
     return location_info
 
@@ -2553,9 +2815,208 @@ def detect_region_fallback(ip: str) -> str:
     except (ValueError, IndexError):
         return "Unknown"
 
+def parse_browser(user_agent: str) -> str:
+    """Parse browser name and version from User-Agent string."""
+    if not user_agent or user_agent == "unknown":
+        return "Unknown"
+    
+    ua = user_agent.lower()
+    
+    # Check for common browsers (order matters - more specific first)
+    if "edg/" in ua or "edge/" in ua:
+        # Extract Edge version
+        import re
+        match = re.search(r'edg[e]?/(\d+[\.\d]*)', ua)
+        version = match.group(1) if match else ""
+        return f"Microsoft Edge ({version})" if version else "Microsoft Edge"
+    
+    if "opr/" in ua or "opera" in ua:
+        import re
+        match = re.search(r'(?:opr|opera)[/\s](\d+[\.\d]*)', ua)
+        version = match.group(1) if match else ""
+        return f"Opera ({version})" if version else "Opera"
+    
+    if "chrome" in ua and "chromium" not in ua:
+        import re
+        match = re.search(r'chrome/(\d+[\.\d]*)', ua)
+        version = match.group(1) if match else ""
+        return f"Chrome ({version})" if version else "Chrome"
+    
+    if "firefox" in ua:
+        import re
+        match = re.search(r'firefox/(\d+[\.\d]*)', ua)
+        version = match.group(1) if match else ""
+        return f"Firefox ({version})" if version else "Firefox"
+    
+    if "safari" in ua and "chrome" not in ua:
+        import re
+        match = re.search(r'version/(\d+[\.\d]*)', ua)
+        version = match.group(1) if match else ""
+        return f"Safari ({version})" if version else "Safari"
+    
+    if "msie" in ua or "trident" in ua:
+        import re
+        match = re.search(r'(?:msie |rv:)(\d+[\.\d]*)', ua)
+        version = match.group(1) if match else ""
+        return f"Internet Explorer ({version})" if version else "Internet Explorer"
+    
+    if "chromium" in ua:
+        return "Chromium"
+    
+    return "Unknown Browser"
+
+
+def parse_os(user_agent: str) -> str:
+    """Parse operating system from User-Agent string."""
+    if not user_agent or user_agent == "unknown":
+        return "Unknown"
+    
+    ua = user_agent.lower()
+    
+    # Windows versions
+    if "windows nt 10.0" in ua:
+        if "windows nt 10.0; win64" in ua:
+            return "Windows 10/11 x64"
+        return "Windows 10/11"
+    if "windows nt 6.3" in ua:
+        return "Windows 8.1"
+    if "windows nt 6.2" in ua:
+        return "Windows 8"
+    if "windows nt 6.1" in ua:
+        return "Windows 7"
+    if "windows nt 6.0" in ua:
+        return "Windows Vista"
+    if "windows nt 5.1" in ua or "windows xp" in ua:
+        return "Windows XP"
+    if "windows" in ua:
+        return "Windows"
+    
+    # macOS
+    if "mac os x" in ua:
+        import re
+        match = re.search(r'mac os x (\d+[_\.]\d+)', ua)
+        if match:
+            version = match.group(1).replace('_', '.')
+            return f"macOS {version}"
+        return "macOS"
+    
+    # iOS
+    if "iphone" in ua:
+        import re
+        match = re.search(r'iphone os (\d+[_\.]\d+)', ua)
+        if match:
+            version = match.group(1).replace('_', '.')
+            return f"iOS {version} (iPhone)"
+        return "iOS (iPhone)"
+    if "ipad" in ua:
+        return "iOS (iPad)"
+    
+    # Android
+    if "android" in ua:
+        import re
+        match = re.search(r'android (\d+[\.\d]*)', ua)
+        if match:
+            return f"Android {match.group(1)}"
+        return "Android"
+    
+    # Linux distributions
+    if "ubuntu" in ua:
+        return "Ubuntu Linux"
+    if "fedora" in ua:
+        return "Fedora Linux"
+    if "linux" in ua:
+        return "Linux"
+    
+    # Chrome OS
+    if "cros" in ua:
+        return "Chrome OS"
+    
+    return "Unknown OS"
+
+
+def normalize_isp(isp_name: str) -> str:
+    """Normalize common ISP names to prevent duplicates in analytics."""
+    if not isp_name or isp_name.lower() == 'unknown':
+        return "Other/Unknown"
+    
+    name = isp_name.strip()
+    # Remove trailing dot if exists
+    if name.endswith('.'):
+        name = name[:-1].strip()
+        
+    name_lower = name.lower()
+    
+    # Reliance Jio variations
+    if "reliance jio" in name_lower or "reliancejio" in name_lower:
+        return "Reliance Jio"
+    
+    # Airtel variations
+    if "bharti airtel" in name_lower or "airtel" in name_lower:
+        return "Bharti Airtel"
+    
+    # Vodafone Idea variations
+    if "vodafone" in name_lower or "idea" in name_lower:
+        return "Vi (Vodafone Idea)"
+    
+    # BSNL variations
+    if "bsnl" in name_lower or "bharat sanchar" in name_lower:
+        return "BSNL"
+    
+    # Tata Tele/Communications
+    if "tata tele" in name_lower or "tata comm" in name_lower:
+        return "Tata"
+        
+    return name
 
 
 
+def get_isp_info(ip: str) -> dict:
+    """Get ISP and hostname via DNS reverse lookup and API fallback."""
+    result = {
+        'isp': 'Unknown',
+        'hostname': 'Unknown',
+        'org': 'Unknown'
+    }
+    
+    if not ip or ip == "unknown" or ip.startswith("127.") or ip.startswith("192.168.") or ip.startswith("10."):
+        # Try to get public IP for dev mode to show real ISP
+        public_ip = get_public_ip_fallback()
+        if public_ip:
+            ip = public_ip
+        else:
+            result['isp'] = 'Local Network'
+            result['hostname'] = 'localhost'
+            return result
+    
+    # Try DNS reverse lookup for hostname
+    try:
+        import socket
+        hostname = socket.gethostbyaddr(ip)[0]
+        result['hostname'] = hostname
+        
+        # Extract potential ISP from hostname
+        # e.g., "user.isp.com" -> "isp.com"
+        parts = hostname.split('.')
+        if len(parts) >= 2:
+            result['isp'] = '.'.join(parts[-2:])
+    except (socket.herror, socket.gaierror, socket.timeout):
+        pass
+    
+    # Try ip-api.com for accurate ISP info (free tier, no API key needed)
+    try:
+        import requests
+        response = requests.get(f"http://ip-api.com/json/{ip}?fields=isp,org,as", timeout=2)
+        if response.status_code == 200:
+            data = response.json()
+            if data.get('isp'):
+                result['isp'] = normalize_isp(data['isp'])
+            if data.get('org'):
+                result['org'] = data['org']
+    except Exception:
+        pass
+    
+    return result
+
+appl = create_app()
 if __name__ == "__main__":
-    app = create_app()
-    app.run(debug=True, port=5000, host="0.0.0.0")
+    appl.run(debug=True, port=5000, host="0.0.0.0")
