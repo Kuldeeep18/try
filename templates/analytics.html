@@ -541,82 +541,6 @@
         </div>
       </div>
     </section>
-
-    <!-- Detailed Visitor Log Section (Grabify-like) -->
-    <section class="mb-4">
-      <div class="card shadow-sm">
-        <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center">
-          <div>
-            <h4 class="h6 fw-bold mb-0">
-              <svg width="18" height="18" fill="currentColor" class="me-2" viewBox="0 0 16 16">
-                <path
-                  d="M8 8a3 3 0 1 0 0-6 3 3 0 0 0 0 6zm2-3a2 2 0 1 1-4 0 2 2 0 0 1 4 0zm4 8c0 1-1 1-1 1H3s-1 0-1-1 1-4 6-4 6 3 6 4zm-1-.004c-.001-.246-.154-.986-.832-1.664C11.516 10.68 10.289 10 8 10c-2.29 0-3.516.68-4.168 1.332-.678.678-.83 1.418-.832 1.664h10z" />
-              </svg>
-              Detailed Visitor Log
-            </h4>
-            <p class="small text-muted mb-0 mt-1">Click on any row to view full details</p>
-          </div>
-          <span class="badge bg-primary">{{ detailed_visitors|length }} visitors</span>
-        </div>
-        <div class="card-body p-0">
-          <div class="table-responsive">
-            <table class="table table-hover table-striped mb-0">
-              <thead class="table-light">
-                <tr>
-                  <th class="small fw-bold">Time</th>
-                  <th class="small fw-bold">IP Address</th>
-                  <th class="small fw-bold">Location</th>
-                  <th class="small fw-bold">Browser</th>
-                  <th class="small fw-bold">OS</th>
-                  <th class="small fw-bold">ISP</th>
-                  <th class="small fw-bold text-center">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {% for visitor in detailed_visitors %}
-                <tr class="visitor-row" style="cursor: pointer;" data-visitor='{{ visitor | tojson }}'
-                  onclick="showVisitorModal(this)">
-                  <td class="small">{{ visitor.timestamp[:19] }}</td>
-                  <td class="small font-monospace">{{ visitor.ip_address }}</td>
-                  <td class="small">
-                    {% if visitor.city and visitor.city != 'Unknown' %}
-                    {{ visitor.city }}, {{ visitor.country }}
-                    {% else %}
-                    {{ visitor.country }}
-                    {% endif %}
-                  </td>
-                  <td class="small">{{ visitor.browser[:30] }}{% if visitor.browser|length > 30 %}...{% endif %}</td>
-                  <td class="small">{{ visitor.os }}</td>
-                  <td class="small">{{ visitor.isp[:25] }}{% if visitor.isp|length > 25 %}...{% endif %}</td>
-                  <td class="text-center">
-                    <button class="btn btn-sm btn-outline-primary"
-                      onclick="event.stopPropagation(); showVisitorModal(this.closest('tr'))">
-                      <svg width="14" height="14" fill="currentColor" viewBox="0 0 16 16">
-                        <path d="M10.5 8a2.5 2.5 0 1 1-5 0 2.5 2.5 0 0 1 5 0z" />
-                        <path
-                          d="M0 8s3-5.5 8-5.5S16 8 16 8s-3 5.5-8 5.5S0 8 0 8zm8 3.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7z" />
-                      </svg>
-                    </button>
-                  </td>
-                </tr>
-                {% else %}
-                <tr>
-                  <td colspan="7" class="text-center py-4 text-muted">
-                    <svg width="48" height="48" fill="currentColor" class="mb-2 opacity-50" viewBox="0 0 16 16">
-                      <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z" />
-                      <path
-                        d="M8 4a.5.5 0 0 1 .5.5v3h3a.5.5 0 0 1 0 1h-3v3a.5.5 0 0 1-1 0v-3h-3a.5.5 0 0 1 0-1h3v-3A.5.5 0 0 1 8 4z" />
-                    </svg>
-                    <p class="mb-0">No visitor data yet. Share your link to start tracking!</p>
-                  </td>
-                </tr>
-                {% endfor %}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </div>
-    </section>
   </main>
 
   <!-- Visitor Details Modal (Grabify-like Advanced Log) -->
@@ -653,13 +577,6 @@
                 <td id="modal-browser"></td>
               </tr>
               <tr>
-<<<<<<< HEAD
-=======
-                <th class="bg-light">Operating System</th>
-                <td id="modal-os"></td>
-              </tr>
-              <tr>
->>>>>>> 98d5b1cbc21ad14ad0a1e94c890ff5869f531743
                 <th class="bg-light">User Agent</th>
                 <td id="modal-useragent" class="small font-monospace text-break"></td>
               </tr>
@@ -722,10 +639,6 @@
       document.getElementById('modal-country').textContent = visitor.country || 'Unknown';
       document.getElementById('modal-city').textContent = visitor.city || 'Unknown';
       document.getElementById('modal-browser').textContent = visitor.browser || 'Unknown';
-<<<<<<< HEAD
-=======
-      document.getElementById('modal-os').textContent = visitor.os || 'Unknown';
->>>>>>> 98d5b1cbc21ad14ad0a1e94c890ff5869f531743
       document.getElementById('modal-useragent').textContent = visitor.user_agent || 'Unknown';
       document.getElementById('modal-referrer').textContent = visitor.referrer || 'no referrer';
       document.getElementById('modal-hostname').textContent = visitor.hostname || 'Unknown';
