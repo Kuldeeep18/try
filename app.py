@@ -14,10 +14,7 @@ GEOIP_AVAILABLE = False
 import requests
 import tarfile
 from email.message import EmailMessage
-from datetime import datetime, timedelta, timezone
-from zoneinfo import ZoneInfo
-# Import threading for async IP fetching if needed, though we'll keep it simple for now
-import threading
+from datetime import datetime, timedelta
 from functools import wraps
 from werkzeug.utils import secure_filename
 
@@ -711,10 +708,9 @@ def create_app() -> Flask:
                 "attention": attention,
                 "hourly": hourly_data,  # Already list of dicts
                 "daily": daily_data,
-                "region": region_data,  # Already list of dicts
-                "cities": [dict(row) for row in city_data],  # SQLite Row objects
-                "device": [dict(row) for row in device_data],  # SQLite Row objects
-                "isp": [dict(row) for row in isp_data],
+                "region": [dict(row) for row in region_data],
+                "cities": [dict(row) for row in city_data],
+                "device": [dict(row) for row in device_data],
                 "weekend_insight": weekend_insight
             }
             
@@ -763,8 +759,6 @@ def create_app() -> Flask:
                 weekend_insight=weekend_insight,
                 analytics_payload=analytics_payload,
                 behavior_rule=behavior_rule,
-                detailed_visitors=detailed_visitors,
-                isp_data=isp_data,
             )
         except Exception as e:
             import traceback
@@ -2815,208 +2809,8 @@ def detect_region_fallback(ip: str) -> str:
     except (ValueError, IndexError):
         return "Unknown"
 
-def parse_browser(user_agent: str) -> str:
-    """Parse browser name and version from User-Agent string."""
-    if not user_agent or user_agent == "unknown":
-        return "Unknown"
-    
-    ua = user_agent.lower()
-    
-    # Check for common browsers (order matters - more specific first)
-    if "edg/" in ua or "edge/" in ua:
-        # Extract Edge version
-        import re
-        match = re.search(r'edg[e]?/(\d+[\.\d]*)', ua)
-        version = match.group(1) if match else ""
-        return f"Microsoft Edge ({version})" if version else "Microsoft Edge"
-    
-    if "opr/" in ua or "opera" in ua:
-        import re
-        match = re.search(r'(?:opr|opera)[/\s](\d+[\.\d]*)', ua)
-        version = match.group(1) if match else ""
-        return f"Opera ({version})" if version else "Opera"
-    
-    if "chrome" in ua and "chromium" not in ua:
-        import re
-        match = re.search(r'chrome/(\d+[\.\d]*)', ua)
-        version = match.group(1) if match else ""
-        return f"Chrome ({version})" if version else "Chrome"
-    
-    if "firefox" in ua:
-        import re
-        match = re.search(r'firefox/(\d+[\.\d]*)', ua)
-        version = match.group(1) if match else ""
-        return f"Firefox ({version})" if version else "Firefox"
-    
-    if "safari" in ua and "chrome" not in ua:
-        import re
-        match = re.search(r'version/(\d+[\.\d]*)', ua)
-        version = match.group(1) if match else ""
-        return f"Safari ({version})" if version else "Safari"
-    
-    if "msie" in ua or "trident" in ua:
-        import re
-        match = re.search(r'(?:msie |rv:)(\d+[\.\d]*)', ua)
-        version = match.group(1) if match else ""
-        return f"Internet Explorer ({version})" if version else "Internet Explorer"
-    
-    if "chromium" in ua:
-        return "Chromium"
-    
-    return "Unknown Browser"
-
-
-def parse_os(user_agent: str) -> str:
-    """Parse operating system from User-Agent string."""
-    if not user_agent or user_agent == "unknown":
-        return "Unknown"
-    
-    ua = user_agent.lower()
-    
-    # Windows versions
-    if "windows nt 10.0" in ua:
-        if "windows nt 10.0; win64" in ua:
-            return "Windows 10/11 x64"
-        return "Windows 10/11"
-    if "windows nt 6.3" in ua:
-        return "Windows 8.1"
-    if "windows nt 6.2" in ua:
-        return "Windows 8"
-    if "windows nt 6.1" in ua:
-        return "Windows 7"
-    if "windows nt 6.0" in ua:
-        return "Windows Vista"
-    if "windows nt 5.1" in ua or "windows xp" in ua:
-        return "Windows XP"
-    if "windows" in ua:
-        return "Windows"
-    
-    # macOS
-    if "mac os x" in ua:
-        import re
-        match = re.search(r'mac os x (\d+[_\.]\d+)', ua)
-        if match:
-            version = match.group(1).replace('_', '.')
-            return f"macOS {version}"
-        return "macOS"
-    
-    # iOS
-    if "iphone" in ua:
-        import re
-        match = re.search(r'iphone os (\d+[_\.]\d+)', ua)
-        if match:
-            version = match.group(1).replace('_', '.')
-            return f"iOS {version} (iPhone)"
-        return "iOS (iPhone)"
-    if "ipad" in ua:
-        return "iOS (iPad)"
-    
-    # Android
-    if "android" in ua:
-        import re
-        match = re.search(r'android (\d+[\.\d]*)', ua)
-        if match:
-            return f"Android {match.group(1)}"
-        return "Android"
-    
-    # Linux distributions
-    if "ubuntu" in ua:
-        return "Ubuntu Linux"
-    if "fedora" in ua:
-        return "Fedora Linux"
-    if "linux" in ua:
-        return "Linux"
-    
-    # Chrome OS
-    if "cros" in ua:
-        return "Chrome OS"
-    
-    return "Unknown OS"
-
-
-def normalize_isp(isp_name: str) -> str:
-    """Normalize common ISP names to prevent duplicates in analytics."""
-    if not isp_name or isp_name.lower() == 'unknown':
-        return "Other/Unknown"
-    
-    name = isp_name.strip()
-    # Remove trailing dot if exists
-    if name.endswith('.'):
-        name = name[:-1].strip()
-        
-    name_lower = name.lower()
-    
-    # Reliance Jio variations
-    if "reliance jio" in name_lower or "reliancejio" in name_lower:
-        return "Reliance Jio"
-    
-    # Airtel variations
-    if "bharti airtel" in name_lower or "airtel" in name_lower:
-        return "Bharti Airtel"
-    
-    # Vodafone Idea variations
-    if "vodafone" in name_lower or "idea" in name_lower:
-        return "Vi (Vodafone Idea)"
-    
-    # BSNL variations
-    if "bsnl" in name_lower or "bharat sanchar" in name_lower:
-        return "BSNL"
-    
-    # Tata Tele/Communications
-    if "tata tele" in name_lower or "tata comm" in name_lower:
-        return "Tata"
-        
-    return name
 
 
 
-def get_isp_info(ip: str) -> dict:
-    """Get ISP and hostname via DNS reverse lookup and API fallback."""
-    result = {
-        'isp': 'Unknown',
-        'hostname': 'Unknown',
-        'org': 'Unknown'
-    }
-    
-    if not ip or ip == "unknown" or ip.startswith("127.") or ip.startswith("192.168.") or ip.startswith("10."):
-        # Try to get public IP for dev mode to show real ISP
-        public_ip = get_public_ip_fallback()
-        if public_ip:
-            ip = public_ip
-        else:
-            result['isp'] = 'Local Network'
-            result['hostname'] = 'localhost'
-            return result
-    
-    # Try DNS reverse lookup for hostname
-    try:
-        import socket
-        hostname = socket.gethostbyaddr(ip)[0]
-        result['hostname'] = hostname
-        
-        # Extract potential ISP from hostname
-        # e.g., "user.isp.com" -> "isp.com"
-        parts = hostname.split('.')
-        if len(parts) >= 2:
-            result['isp'] = '.'.join(parts[-2:])
-    except (socket.herror, socket.gaierror, socket.timeout):
-        pass
-    
-    # Try ip-api.com for accurate ISP info (free tier, no API key needed)
-    try:
-        import requests
-        response = requests.get(f"http://ip-api.com/json/{ip}?fields=isp,org,as", timeout=2)
-        if response.status_code == 200:
-            data = response.json()
-            if data.get('isp'):
-                result['isp'] = normalize_isp(data['isp'])
-            if data.get('org'):
-                result['org'] = data['org']
-    except Exception:
-        pass
-    
-    return result
-
-appl = create_app()
 if __name__ == "__main__":
     appl.run(debug=True, port=5000, host="0.0.0.0")
